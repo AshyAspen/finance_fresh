@@ -161,7 +161,6 @@ def ledger_view() -> None:
             "Ledger",
             choices=choices,
             default=default_entry,
-            page_size=5,
         ).ask()
         if choice == "Exit" or choice is None:
             break
