@@ -12,38 +12,29 @@ from .models import Transaction, Balance
 
 
 def select(message, choices, default=None):
-    """Display a simple menu and return the selected value.
+    """Display a scrollable menu and return the selected value.
 
-    ``choices`` may be a list of strings or ``(title, value)`` pairs. The user
-    selects an option by entering its corresponding number. If an empty string
-    is entered and ``default`` is provided, the default value is returned.
+    ``choices`` may be a list of strings or ``(title, value)`` pairs. The menu
+    is navigated with the arrow keys and the highlighted entry is returned when
+    the user presses Enter. ``default`` selects the initially highlighted value
+    if provided.
     """
 
-    titles = []
+    titles: list[str] = []
     values = []
-    for choice in choices:
+    default_idx = 0
+    for idx, choice in enumerate(choices):
         if isinstance(choice, tuple):
             title, value = choice
         else:
             title = value = choice
         titles.append(title)
         values.append(value)
+        if default is not None and value == default:
+            default_idx = idx
 
-    while True:
-        print(message)
-        for idx, title in enumerate(titles, 1):
-            prefix = "*" if values[idx - 1] == default else " "
-            print(f"{idx}. {title}{' (default)' if prefix == '*' else ''}")
-        resp = input("Enter choice number: ")
-        if resp == "" and default is not None:
-            return default
-        try:
-            num = int(resp) - 1
-            if 0 <= num < len(values):
-                return values[num]
-        except ValueError:
-            pass
-        print("Invalid selection. Please try again.\n")
+    selected = scroll_menu(titles, default_idx, header=message)
+    return values[selected]
 
 
 def text(message, default=None):
@@ -218,12 +209,13 @@ def build_ledger_entries():
     return choices, default_idx
 
 
-def scroll_menu(entries, index, height: int = 10):
+def scroll_menu(entries, index, height: int = 10, header: str | None = None):
     """Display ``entries`` in a simple scrollable window.
 
     Only standard library modules are used to render the list and capture
     arrow-key navigation. The function returns the index of the selected
-    entry when the user presses Enter.
+    entry when the user presses Enter. If ``header`` is provided, it is shown
+    above the scrolling list on each redraw.
     """
 
     fd = sys.stdin.fileno()
@@ -231,6 +223,8 @@ def scroll_menu(entries, index, height: int = 10):
 
     def render(top: int, idx: int) -> None:
         os.system("clear")
+        if header:
+            sys.stdout.write(header + "\n")
         for i in range(height):
             line_idx = top + i
             if line_idx >= len(entries):

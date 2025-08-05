@@ -133,9 +133,10 @@ def test_ledger_running_balance(monkeypatch):
 
         captured = {}
 
-        def fake_scroll(entries, index, height=10):
+        def fake_scroll(entries, index, height=10, header=None):
             captured["entries"] = entries
             captured["index"] = index
+            captured["header"] = header
             # return bottom "Exit" to exit immediately
             return len(entries) - 1
 
@@ -149,6 +150,7 @@ def test_ledger_running_balance(monkeypatch):
         assert titles[2] == "2023-01-02 | T2 |  20.00 | 110.00"
         assert titles[3] == "Exit"
         assert captured["index"] == 2
+        assert captured["header"] is None
     finally:
         path.unlink()
 
@@ -183,3 +185,24 @@ def test_list_transactions_columns(monkeypatch):
         assert titles[2] == "Back"
     finally:
         path.unlink()
+
+
+def test_select_uses_scroll_menu(monkeypatch):
+    captured = {}
+
+    def fake_scroll(entries, index, height=10, header=None):
+        captured["entries"] = entries
+        captured["index"] = index
+        captured["header"] = header
+        return 1  # choose second item
+
+    monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+
+    result = cli.select(
+        "Pick", ["A", ("B title", "b"), "C"], default="b"
+    )
+
+    assert captured["entries"] == ["A", "B title", "C"]
+    assert captured["index"] == 1
+    assert captured["header"] == "Pick"
+    assert result == "b"
