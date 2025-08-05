@@ -9,10 +9,12 @@ from .database import SessionLocal, init_db
 from .models import Transaction, Balance
 
 
-def select(message, choices, default=None):
+def select(message, choices, default=None, menu_height=None):
     """Display a menu and return the selected value.
 
-    ``choices`` may be a list of strings or ``(title, value)`` pairs.
+    ``choices`` may be a list of strings or ``(title, value)`` pairs. ``menu_height``
+    controls how many entries are visible at once, enabling a scrollable view when
+    the list exceeds that height.
     """
 
     titles = []
@@ -25,7 +27,13 @@ def select(message, choices, default=None):
         titles.append(title)
         values.append(value)
     index = values.index(default) if default in values else 0
-    menu = TerminalMenu(titles, title=message, cursor_index=index, cycle_cursor=True)
+    menu = TerminalMenu(
+        titles,
+        title=message,
+        cursor_index=index,
+        cycle_cursor=True,
+        menu_height=menu_height,
+    )
     selection = menu.show()
     if selection is None:
         return None
@@ -184,8 +192,14 @@ def ledger_view() -> None:
     session.close()
     choices = ["Exit"] + entries + ["Exit"]
     default_entry = entries[today_idx] if entries else "Exit"
+    header = "date | name | amount | balance"
     while True:
-        choice = select("Ledger", choices=choices, default=default_entry)
+        choice = select(
+            f"Ledger\n{header}",
+            choices=choices,
+            default=default_entry,
+            menu_height=7,
+        )
         if choice == "Exit" or choice is None:
             break
 

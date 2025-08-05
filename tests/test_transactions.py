@@ -133,7 +133,7 @@ def test_ledger_running_balance(monkeypatch):
 
         captured = {}
 
-        def fake_select(message, choices, default=None):
+        def fake_select(message, choices, default=None, **kwargs):
             captured["choices"] = choices
             captured["default"] = default
             return "Exit"
