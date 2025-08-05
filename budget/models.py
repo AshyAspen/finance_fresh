@@ -13,3 +13,12 @@ class Transaction(Base):
     description = Column(String, nullable=False)
     amount = Column(Float, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+class Balance(Base):
+    """Stores the user's current balance."""
+
+    __tablename__ = "balance"
+
+    id = Column(Integer, primary_key=True, default=1)
+    amount = Column(Float, nullable=False, default=0.0)
