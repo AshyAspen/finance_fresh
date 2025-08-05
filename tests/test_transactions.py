@@ -10,10 +10,8 @@ from sqlalchemy.orm import sessionmaker
 # Ensure the project root is on the Python path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-import questionary
-
 from budget import cli, database
-from budget.models import Transaction
+from budget.models import Transaction, Balance
 
 
 def get_temp_session():
@@ -47,11 +45,7 @@ def make_prompt(responses):
     iterator = iter(responses)
 
     def _prompt(*args, **kwargs):
-        class Prompt:
-            def ask(self):
-                return next(iterator)
-
-        return Prompt()
+        return next(iterator)
 
     return _prompt
 
@@ -61,10 +55,10 @@ def test_add_transaction_with_date(monkeypatch):
     try:
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(
-            questionary, "select", make_prompt(["description", "date", "amount", "save"])
+            cli, "select", make_prompt(["description", "date", "amount", "save"])
         )
         monkeypatch.setattr(
-            questionary, "text", make_prompt(["Groceries", "2023-02-01", "20.5"])
+            cli, "text", make_prompt(["Groceries", "2023-02-01", "20.5"])
         )
 
         cli.add_transaction()
@@ -92,10 +86,10 @@ def test_edit_transaction(monkeypatch):
         session.commit()
 
         monkeypatch.setattr(
-            questionary, "select", make_prompt(["description", "amount", "date", "save"])
+            cli, "select", make_prompt(["description", "amount", "date", "save"])
         )
         monkeypatch.setattr(
-            questionary, "text", make_prompt(["New", "10.0", "2023-03-03"])
+            cli, "text", make_prompt(["New", "10.0", "2023-03-03"])
         )
 
         cli.edit_transaction(session, txn)
@@ -105,4 +99,54 @@ def test_edit_transaction(monkeypatch):
         assert txn.timestamp.date() == datetime(2023, 3, 3).date()
     finally:
         session.close()
+        path.unlink()
+
+
+def test_set_balance(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "text", make_prompt(["100.0"]))
+        cli.set_balance()
+        session = Session()
+        bal = session.get(Balance, 1)
+        assert bal is not None
+        assert bal.amount == 100.0
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_ledger_running_balance(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=100.0),
+                Transaction(description="T1", amount=-10.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="T2", amount=20.0, timestamp=datetime(2023, 1, 2)),
+            ]
+        )
+        session.commit()
+        session.close()
+
+        captured = {}
+
+        def fake_select(message, choices, default=None):
+            captured["choices"] = choices
+            captured["default"] = default
+            return "Exit"
+
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "select", fake_select)
+        cli.ledger_view()
+
+        titles = captured["choices"]
+        assert titles[0] == "Exit"
+        assert titles[1] == "2023-01-01 | T1 | -10.00 | 90.00"
+        assert titles[2] == "2023-01-02 | T2 | 20.00 | 110.00"
+        assert titles[3] == "Exit"
+        assert captured["default"] == titles[2]
+    finally:
         path.unlink()
