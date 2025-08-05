@@ -1,12 +1,12 @@
 """Command-line interface for budget app."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, date
 
 import questionary
 
 from .database import SessionLocal, init_db
-from .models import Transaction
+from .models import Transaction, Balance
 
 
 def transaction_form(
@@ -108,6 +108,65 @@ def list_transactions() -> None:
     session.close()
 
 
+def set_balance() -> None:
+    """Prompt the user to store their current balance."""
+    amount_str = questionary.text("Current balance").ask()
+    if amount_str is None:
+        return
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        print("Invalid amount.")
+        return
+    session = SessionLocal()
+    bal = session.get(Balance, 1)
+    if bal is None:
+        bal = Balance(id=1, amount=amount)
+        session.add(bal)
+    else:
+        bal.amount = amount
+    session.commit()
+    session.close()
+
+
+def ledger_view() -> None:
+    """Display a scrollable ledger with running balance."""
+    session = SessionLocal()
+    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
+    if not txns:
+        print("No transactions recorded yet.\n")
+        session.close()
+        return
+    bal = session.get(Balance, 1)
+    running = bal.amount if bal else 0.0
+    entries = []
+    today = date.today()
+    today_idx = 0
+    for idx, txn in enumerate(txns):
+        running += txn.amount
+        entry = (
+            f"{txn.timestamp.strftime('%Y-%m-%d')} | {txn.description} | {txn.amount:.2f} | {running:.2f}"
+        )
+        entries.append(entry)
+        if txn.timestamp.date() <= today:
+            today_idx = idx
+    session.close()
+    choices = [questionary.Choice("Exit")]
+    for e in entries:
+        choices.append(questionary.Choice(title=e))
+    choices.append(questionary.Choice("Exit"))
+    default_entry = entries[today_idx] if entries else "Exit"
+    while True:
+        choice = questionary.select(
+            "Ledger",
+            choices=choices,
+            default=default_entry,
+            page_size=5,
+        ).ask()
+        if choice == "Exit" or choice is None:
+            break
+
+
 def edit_wants_goals() -> None:
     """Placeholder for editing wants/goals."""
     print("Edit wants/goals selected (feature not implemented).\n")
@@ -156,6 +215,8 @@ def main() -> None:
             choices=[
                 "Enter transaction",
                 "List transactions",
+                "Ledger",
+                "Set balance",
                 "Wants/Goals",
                 "Quit",
             ],
@@ -164,6 +225,10 @@ def main() -> None:
             add_transaction()
         elif choice == "List transactions":
             list_transactions()
+        elif choice == "Ledger":
+            ledger_view()
+        elif choice == "Set balance":
+            set_balance()
         elif choice == "Wants/Goals":
             wants_goals_menu()
         else:
