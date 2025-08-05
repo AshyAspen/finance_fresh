@@ -234,23 +234,36 @@ def scroll_menu(
 
         while True:  # redraw loop
             h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
             offset = 1 if header else 0
             visible = min(len(entries), height or (h - 1 - offset))
             top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
 
             stdscr.erase()
             if header:
-                stdscr.addnstr(0, max(0, (w - len(header)) // 2), header, w - 1)
+                head_x = max(0, (w - len(header)) // 2)
+                try:
+                    stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                except curses.error:
+                    pass
             for i in range(visible):
                 line_idx = top + i
                 if line_idx >= len(entries):
                     break
                 line = entries[line_idx]
                 attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
-                stdscr.addnstr(i + offset, 0, line[: w - 1], attr)
+                try:
+                    stdscr.addstr(i + offset, 0, line[: w - 1], attr)
+                except curses.error:
+                    pass
 
             footer = f"{footer_left} | {footer_right}"
-            stdscr.addnstr(h - 1, max(0, w - len(footer)), footer, w - 1)
+            foot_x = max(0, w - len(footer))
+            try:
+                stdscr.addnstr(h - 1, foot_x, footer, max(0, w - foot_x))
+            except curses.error:
+                pass
             stdscr.refresh()
 
             key = stdscr.getch()
