@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from datetime import datetime, date
-import curses
+import sys
+import termios
+import tty
+import os
 
 from .database import SessionLocal, init_db
 from .models import Transaction, Balance
@@ -216,39 +219,53 @@ def build_ledger_entries():
 
 
 def scroll_menu(entries, index, height: int = 10):
-    """Display ``entries`` in a scrollable window using curses.
+    """Display ``entries`` in a simple scrollable window.
 
-    Returns the index of the selected entry when the user presses Enter.
+    Only standard library modules are used to render the list and capture
+    arrow-key navigation. The function returns the index of the selected
+    entry when the user presses Enter.
     """
 
-    def _inner(stdscr):
-        curses.curs_set(0)
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    def render(top: int, idx: int) -> None:
+        os.system("clear")
+        for i in range(height):
+            line_idx = top + i
+            if line_idx >= len(entries):
+                break
+            line = entries[line_idx]
+            if line_idx == idx:
+                sys.stdout.write("\x1b[7m" + line + "\x1b[0m\n")
+            else:
+                sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
         top = max(0, index - height // 2)
+        render(top, index)
         while True:
-            stdscr.clear()
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                next1 = sys.stdin.read(1)
+                if next1 == "[":
+                    next2 = sys.stdin.read(1)
+                    if next2 == "A" and index > 0:
+                        index -= 1
+                    elif next2 == "B" and index < len(entries) - 1:
+                        index += 1
+            elif ch in ("\n", "\r"):
+                return index
             if index < top:
                 top = index
             elif index >= top + height:
                 top = index - height + 1
-            for i in range(height):
-                line_idx = top + i
-                if line_idx >= len(entries):
-                    break
-                line = entries[line_idx]
-                if line_idx == index:
-                    stdscr.addstr(i, 0, line, curses.A_REVERSE)
-                else:
-                    stdscr.addstr(i, 0, line)
-            stdscr.refresh()
-            key = stdscr.getch()
-            if key in (curses.KEY_UP, ord('k')) and index > 0:
-                index -= 1
-            elif key in (curses.KEY_DOWN, ord('j')) and index < len(entries) - 1:
-                index += 1
-            elif key in (curses.KEY_ENTER, 10, 13):
-                return index
-
-    return curses.wrapper(_inner)
+            render(top, index)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        os.system("clear")
 
 
 def ledger_view() -> None:
