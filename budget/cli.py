@@ -221,6 +221,7 @@ def scroll_menu(
     """
 
     def _menu(stdscr):
+        nonlocal index
         curses.curs_set(0)
         stdscr.keypad(True)
 
