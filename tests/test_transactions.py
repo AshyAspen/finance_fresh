@@ -144,9 +144,41 @@ def test_ledger_running_balance(monkeypatch):
 
         titles = captured["choices"]
         assert titles[0] == "Exit"
-        assert titles[1] == "2023-01-01 | T1 | -10.00 | 90.00"
-        assert titles[2] == "2023-01-02 | T2 | 20.00 | 110.00"
+        assert titles[1] == "2023-01-01 | T1 | -10.00 |  90.00"
+        assert titles[2] == "2023-01-02 | T2 |  20.00 | 110.00"
         assert titles[3] == "Exit"
         assert captured["default"] == titles[2]
+    finally:
+        path.unlink()
+
+
+def test_list_transactions_columns(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Transaction(description="Short", amount=5.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="Longer", amount=-3.0, timestamp=datetime(2023, 1, 2)),
+            ]
+        )
+        session.commit()
+        session.close()
+
+        captured = {}
+
+        def fake_select(message, choices, default=None):
+            captured["choices"] = choices
+            return None
+
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "select", fake_select)
+
+        cli.list_transactions()
+
+        titles = [title for title, _ in captured["choices"]]
+        assert titles[0] == "2023-01-01 | Short  |  5.00"
+        assert titles[1] == "2023-01-02 | Longer | -3.00"
+        assert titles[2] == "Back"
     finally:
         path.unlink()

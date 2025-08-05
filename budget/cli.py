@@ -122,9 +122,11 @@ def list_transactions() -> None:
         if not txns:
             print("No transactions recorded yet.\n")
             break
+        desc_w = max(len(t.description) for t in txns)
+        amt_w = max(len(f"{t.amount:.2f}") for t in txns)
         choices = [
             (
-                f"{t.timestamp.strftime('%Y-%m-%d %H:%M')} | {t.description} | ${t.amount:.2f}",
+                f"{t.timestamp.strftime('%Y-%m-%d')} | {t.description:<{desc_w}} | {t.amount:>{amt_w}.2f}",
                 t.id,
             )
             for t in txns
@@ -169,15 +171,26 @@ def ledger_view() -> None:
         session.close()
         return
     bal = session.get(Balance, 1)
-    running = bal.amount if bal else 0.0
+    base = bal.amount if bal else 0.0
+    running_values = []
+    running = base
+    for txn in txns:
+        running += txn.amount
+        running_values.append(running)
+    desc_w = max(len(t.description) for t in txns)
+    amt_w = max(len(f"{t.amount:.2f}") for t in txns)
+    run_w = max(len(f"{r:.2f}") for r in running_values) if running_values else 0
     entries = []
     today = date.today()
     today_idx = 0
+    running = base
     for idx, txn in enumerate(txns):
         running += txn.amount
-        entry = (
-            f"{txn.timestamp.strftime('%Y-%m-%d')} | {txn.description} | {txn.amount:.2f} | {running:.2f}"
-        )
+        date_str = txn.timestamp.strftime("%Y-%m-%d")
+        desc = f"{txn.description:<{desc_w}}"
+        amt = f"{txn.amount:>{amt_w}.2f}"
+        run = f"{running:>{run_w}.2f}"
+        entry = f"{date_str} | {desc} | {amt} | {run}"
         entries.append(entry)
         if txn.timestamp.date() <= today:
             today_idx = idx
