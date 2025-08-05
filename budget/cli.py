@@ -45,6 +45,46 @@ def list_transactions() -> None:
     input("Press Enter to continue...")
 
 
+def edit_wants_goals() -> None:
+    """Placeholder for editing wants/goals."""
+    print("Edit wants/goals selected (feature not implemented).\n")
+    input("Press Enter to continue...")
+
+
+def toggle_wants_goals() -> None:
+    """Placeholder for toggling wants/goals."""
+    print("Toggle wants/goals selected (feature not implemented).\n")
+    input("Press Enter to continue...")
+
+
+def add_wants_goals() -> None:
+    """Placeholder for adding wants/goals."""
+    print("Add wants/goals selected (feature not implemented).\n")
+    input("Press Enter to continue...")
+
+
+def wants_goals_menu() -> None:
+    """Secondary menu for wants/goals related actions."""
+    while True:
+        choice = questionary.select(
+            "Wants/Goals options",
+            choices=[
+                "Edit wants/goals",
+                "Toggle wants/goals",
+                "Add wants/goals",
+                "Back",
+            ],
+        ).ask()
+        if choice == "Edit wants/goals":
+            edit_wants_goals()
+        elif choice == "Toggle wants/goals":
+            toggle_wants_goals()
+        elif choice == "Add wants/goals":
+            add_wants_goals()
+        else:
+            break
+
+
 def main() -> None:
     init_db()
     while True:
@@ -53,6 +93,7 @@ def main() -> None:
             choices=[
                 "Enter transaction",
                 "List transactions",
+                "Wants/Goals",
                 "Quit",
             ],
         ).ask()
@@ -60,6 +101,8 @@ def main() -> None:
             add_transaction()
         elif choice == "List transactions":
             list_transactions()
+        elif choice == "Wants/Goals":
+            wants_goals_menu()
         else:
             break
 
