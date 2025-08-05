@@ -2,17 +2,18 @@
 from __future__ import annotations
 
 from datetime import datetime, date
-
-from simple_term_menu import TerminalMenu
+import curses
 
 from .database import SessionLocal, init_db
 from .models import Transaction, Balance
 
 
 def select(message, choices, default=None):
-    """Display a menu and return the selected value.
+    """Display a simple menu and return the selected value.
 
-    ``choices`` may be a list of strings or ``(title, value)`` pairs.
+    ``choices`` may be a list of strings or ``(title, value)`` pairs. The user
+    selects an option by entering its corresponding number. If an empty string
+    is entered and ``default`` is provided, the default value is returned.
     """
 
     titles = []
@@ -24,12 +25,22 @@ def select(message, choices, default=None):
             title = value = choice
         titles.append(title)
         values.append(value)
-    index = values.index(default) if default in values else 0
-    menu = TerminalMenu(titles, title=message, cursor_index=index, cycle_cursor=True)
-    selection = menu.show()
-    if selection is None:
-        return None
-    return values[selection]
+
+    while True:
+        print(message)
+        for idx, title in enumerate(titles, 1):
+            prefix = "*" if values[idx - 1] == default else " "
+            print(f"{idx}. {title}{' (default)' if prefix == '*' else ''}")
+        resp = input("Enter choice number: ")
+        if resp == "" and default is not None:
+            return default
+        try:
+            num = int(resp) - 1
+            if 0 <= num < len(values):
+                return values[num]
+        except ValueError:
+            pass
+        print("Invalid selection. Please try again.\n")
 
 
 def text(message, default=None):
@@ -162,14 +173,18 @@ def set_balance() -> None:
     session.close()
 
 
-def ledger_view() -> None:
-    """Display a scrollable ledger as ``date | name | amount | balance``."""
+def build_ledger_entries():
+    """Return formatted ledger entries and default index.
+
+    The returned list includes "Exit" at the beginning and end. The default
+    index highlights the most recent past transaction relative to today.
+    """
+
     session = SessionLocal()
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     if not txns:
-        print("No transactions recorded yet.\n")
         session.close()
-        return
+        return [], 0
     bal = session.get(Balance, 1)
     base = bal.amount if bal else 0.0
     running_values = []
@@ -179,7 +194,7 @@ def ledger_view() -> None:
         running_values.append(running)
     desc_w = max(len(t.description) for t in txns)
     amt_w = max(len(f"{t.amount:.2f}") for t in txns)
-    run_w = max(len(f"{r:.2f}") for r in running_values) if running_values else 0
+    run_w = max(len(f"{r:.2f}") for r in running_values)
     entries = []
     today = date.today()
     today_idx = 0
@@ -196,10 +211,56 @@ def ledger_view() -> None:
             today_idx = idx
     session.close()
     choices = ["Exit"] + entries + ["Exit"]
-    default_entry = entries[today_idx] if entries else "Exit"
+    default_idx = today_idx + 1  # account for leading Exit
+    return choices, default_idx
+
+
+def scroll_menu(entries, index, height: int = 10):
+    """Display ``entries`` in a scrollable window using curses.
+
+    Returns the index of the selected entry when the user presses Enter.
+    """
+
+    def _inner(stdscr):
+        curses.curs_set(0)
+        top = max(0, index - height // 2)
+        while True:
+            stdscr.clear()
+            if index < top:
+                top = index
+            elif index >= top + height:
+                top = index - height + 1
+            for i in range(height):
+                line_idx = top + i
+                if line_idx >= len(entries):
+                    break
+                line = entries[line_idx]
+                if line_idx == index:
+                    stdscr.addstr(i, 0, line, curses.A_REVERSE)
+                else:
+                    stdscr.addstr(i, 0, line)
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key in (curses.KEY_UP, ord('k')) and index > 0:
+                index -= 1
+            elif key in (curses.KEY_DOWN, ord('j')) and index < len(entries) - 1:
+                index += 1
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return index
+
+    return curses.wrapper(_inner)
+
+
+def ledger_view() -> None:
+    """Display a scrollable ledger as ``date | name | amount | balance``."""
+
+    entries, index = build_ledger_entries()
+    if not entries:
+        print("No transactions recorded yet.\n")
+        return
     while True:
-        choice = select("Ledger", choices=choices, default=default_entry)
-        if choice == "Exit" or choice is None:
+        index = scroll_menu(entries, index)
+        if entries[index] == "Exit":
             break
 
 

@@ -133,21 +133,22 @@ def test_ledger_running_balance(monkeypatch):
 
         captured = {}
 
-        def fake_select(message, choices, default=None):
-            captured["choices"] = choices
-            captured["default"] = default
-            return "Exit"
+        def fake_scroll(entries, index, height=10):
+            captured["entries"] = entries
+            captured["index"] = index
+            # return bottom "Exit" to exit immediately
+            return len(entries) - 1
 
         monkeypatch.setattr(cli, "SessionLocal", Session)
-        monkeypatch.setattr(cli, "select", fake_select)
+        monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
         cli.ledger_view()
 
-        titles = captured["choices"]
+        titles = captured["entries"]
         assert titles[0] == "Exit"
         assert titles[1] == "2023-01-01 | T1 | -10.00 |  90.00"
         assert titles[2] == "2023-01-02 | T2 |  20.00 | 110.00"
         assert titles[3] == "Exit"
-        assert captured["default"] == titles[2]
+        assert captured["index"] == 2
     finally:
         path.unlink()
 
