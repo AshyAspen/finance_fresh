@@ -42,7 +42,7 @@ def list_transactions() -> None:
             print(f"{ts} | {txn.description} | ${txn.amount:.2f}")
         print()
     session.close()
-    input("Press Enter to continue...")
+    questionary.select("Press Enter to go back", choices=["Back"]).ask()
 
 
 def main() -> None:
