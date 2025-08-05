@@ -100,7 +100,7 @@ def list_transactions() -> None:
         ]
         choices.append(questionary.Choice(title="Back", value=None))
         choice = questionary.select("Select transaction to edit", choices=choices).ask()
-        if choice is None:
+        if choice == "Back" or choice is None:
             break
         txn = session.get(Transaction, choice)
         if txn is not None:
