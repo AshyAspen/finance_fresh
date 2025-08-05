@@ -3,10 +3,43 @@ from __future__ import annotations
 
 from datetime import datetime, date
 
-import questionary
+from simple_term_menu import TerminalMenu
 
 from .database import SessionLocal, init_db
 from .models import Transaction, Balance
+
+
+def select(message, choices, default=None):
+    """Display a menu and return the selected value.
+
+    ``choices`` may be a list of strings or ``(title, value)`` pairs.
+    """
+
+    titles = []
+    values = []
+    for choice in choices:
+        if isinstance(choice, tuple):
+            title, value = choice
+        else:
+            title = value = choice
+        titles.append(title)
+        values.append(value)
+    index = values.index(default) if default in values else 0
+    menu = TerminalMenu(titles, title=message, cursor_index=index, cycle_cursor=True)
+    selection = menu.show()
+    if selection is None:
+        return None
+    return values[selection]
+
+
+def text(message, default=None):
+    """Prompt the user for free-form text input."""
+
+    prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
+    response = input(prompt)
+    if response == "" and default is not None:
+        return default
+    return response
 
 
 def transaction_form(
@@ -18,34 +51,32 @@ def transaction_form(
     """
 
     while True:
-        choice = questionary.select(
+        choice = select(
             "Select field to edit",
             choices=[
-                questionary.Choice(title=f"Name: {description}", value="description"),
-                questionary.Choice(
-                    title=f"Date: {timestamp.strftime('%Y-%m-%d')}", value="date"
-                ),
-                questionary.Choice(title=f"Amount: {amount}", value="amount"),
-                questionary.Choice(title="Save", value="save"),
-                questionary.Choice(title="Cancel", value="cancel"),
+                (f"Name: {description}", "description"),
+                (f"Date: {timestamp.strftime('%Y-%m-%d')}", "date"),
+                (f"Amount: {amount}", "amount"),
+                ("Save", "save"),
+                ("Cancel", "cancel"),
             ],
-        ).ask()
+        )
 
         if choice == "description":
-            new_desc = questionary.text("Description", default=description).ask()
+            new_desc = text("Description", default=description)
             if new_desc is not None:
                 description = new_desc
         elif choice == "date":
-            date_str = questionary.text(
+            date_str = text(
                 "Date (YYYY-MM-DD)", default=timestamp.strftime("%Y-%m-%d")
-            ).ask()
+            )
             if date_str is not None:
                 try:
                     timestamp = datetime.strptime(date_str, "%Y-%m-%d")
                 except ValueError:
                     print("Invalid date format. Use YYYY-MM-DD.")
         elif choice == "amount":
-            amount_str = questionary.text("Amount", default=str(amount)).ask()
+            amount_str = text("Amount", default=str(amount))
             if amount_str is not None:
                 try:
                     amount = float(amount_str)
@@ -92,15 +123,15 @@ def list_transactions() -> None:
             print("No transactions recorded yet.\n")
             break
         choices = [
-            questionary.Choice(
-                title=f"{t.timestamp.strftime('%Y-%m-%d %H:%M')} | {t.description} | ${t.amount:.2f}",
-                value=t.id,
+            (
+                f"{t.timestamp.strftime('%Y-%m-%d %H:%M')} | {t.description} | ${t.amount:.2f}",
+                t.id,
             )
             for t in txns
         ]
-        choices.append(questionary.Choice(title="Back", value=None))
-        choice = questionary.select("Select transaction to edit", choices=choices).ask()
-        if choice == "Back" or choice is None:
+        choices.append(("Back", None))
+        choice = select("Select transaction to edit", choices)
+        if choice is None:
             break
         txn = session.get(Transaction, choice)
         if txn is not None:
@@ -110,7 +141,7 @@ def list_transactions() -> None:
 
 def set_balance() -> None:
     """Prompt the user to store their current balance."""
-    amount_str = questionary.text("Current balance").ask()
+    amount_str = text("Current balance")
     if amount_str is None:
         return
     try:
@@ -151,17 +182,10 @@ def ledger_view() -> None:
         if txn.timestamp.date() <= today:
             today_idx = idx
     session.close()
-    choices = [questionary.Choice("Exit")]
-    for e in entries:
-        choices.append(questionary.Choice(title=e))
-    choices.append(questionary.Choice("Exit"))
+    choices = ["Exit"] + entries + ["Exit"]
     default_entry = entries[today_idx] if entries else "Exit"
     while True:
-        choice = questionary.select(
-            "Ledger",
-            choices=choices,
-            default=default_entry,
-        ).ask()
+        choice = select("Ledger", choices=choices, default=default_entry)
         if choice == "Exit" or choice is None:
             break
 
@@ -187,7 +211,7 @@ def add_wants_goals() -> None:
 def wants_goals_menu() -> None:
     """Secondary menu for wants/goals related actions."""
     while True:
-        choice = questionary.select(
+        choice = select(
             "Wants/Goals options",
             choices=[
                 "Edit wants/goals",
@@ -195,7 +219,7 @@ def wants_goals_menu() -> None:
                 "Add wants/goals",
                 "Back",
             ],
-        ).ask()
+        )
         if choice == "Edit wants/goals":
             edit_wants_goals()
         elif choice == "Toggle wants/goals":
@@ -209,7 +233,7 @@ def wants_goals_menu() -> None:
 def main() -> None:
     init_db()
     while True:
-        choice = questionary.select(
+        choice = select(
             "Select an option",
             choices=[
                 "Enter transaction",
@@ -219,7 +243,7 @@ def main() -> None:
                 "Wants/Goals",
                 "Quit",
             ],
-        ).ask()
+        )
         if choice == "Enter transaction":
             add_transaction()
         elif choice == "List transactions":

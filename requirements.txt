@@ -1,2 +1,2 @@
-questionary
+simple-term-menu
 sqlalchemy
