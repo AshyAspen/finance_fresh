@@ -42,6 +42,9 @@ def _apply_theme(stdscr):
         attr = curses.color_pair(1)
         stdscr.bkgd(" ", attr)
         stdscr.attron(attr)
+        stdscr.erase()
+        stdscr.noutrefresh()
+        curses.doupdate()
     except curses.error:
         pass
     return attr
