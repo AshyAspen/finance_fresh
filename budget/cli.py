@@ -278,11 +278,13 @@ def set_balance() -> None:
         return
     session = SessionLocal()
     bal = session.get(Balance, 1)
+    now = datetime.utcnow()
     if bal is None:
-        bal = Balance(id=1, amount=amount)
+        bal = Balance(id=1, amount=amount, timestamp=now)
         session.add(bal)
     else:
         bal.amount = amount
+        bal.timestamp = now
     session.commit()
     session.close()
 
@@ -683,29 +685,17 @@ def ledger_view() -> None:
 
     session = SessionLocal()
     bal = session.get(Balance, 1)
-    bal_amt = bal.amount if bal else 0.0
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
-    today = date.today()
-    start_ev = prev_event(today + timedelta(days=1), txns, recs)
-    if start_ev is None:
-        start_ev = next_event(today - timedelta(days=1), txns, recs)
-    if start_ev is None:
-        print("No transactions recorded yet.\n")
-        session.close()
-        return
-    start_date, start_desc, start_amt = start_ev
 
-    running = bal_amt
-    for t in txns:
-        if t.timestamp.date() <= start_date:
-            running += t.amount
-    for r in recs:
-        count = count_occurrences(r.start_date.date(), r.frequency, start_date)
-        running += count * r.amount
-    # running now includes amount at start_date; adjust to show balance after start_amt
-    start_running = running
-    initial_row = LedgerRow(start_date, start_desc, start_amt, start_running)
+    if bal is None:
+        bal_amt = 0.0
+        bal_date = date.today()
+    else:
+        bal_amt = bal.amount
+        bal_date = bal.timestamp.date()
+
+    initial_row = LedgerRow(bal_date, "Balance", 0.0, bal_amt)
 
     def get_next(date_after):
         return next_event(date_after, txns, recs)

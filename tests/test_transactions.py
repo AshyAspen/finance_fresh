@@ -113,6 +113,7 @@ def test_set_balance(monkeypatch):
         bal = session.get(Balance, 1)
         assert bal is not None
         assert bal.amount == 100.0
+        assert bal.timestamp is not None
     finally:
         session.close()
         path.unlink()
@@ -124,7 +125,7 @@ def test_ledger_running_balance():
         session = Session()
         session.add_all(
             [
-                Balance(id=1, amount=100.0),
+                Balance(id=1, amount=100.0, timestamp=datetime(2023, 1, 1)),
                 Transaction(description="T1", amount=-10.0, timestamp=datetime(2023, 1, 1)),
                 Transaction(description="T2", amount=20.0, timestamp=datetime(2023, 1, 2)),
             ]
@@ -144,7 +145,7 @@ def test_ledger_includes_recurring():
         session = Session()
         session.add_all(
             [
-                Balance(id=1, amount=0.0),
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
                 Recurring(
                     description="Rent",
                     amount=-50.0,

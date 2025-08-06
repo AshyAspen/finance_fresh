@@ -22,6 +22,7 @@ class Balance(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     amount = Column(Float, nullable=False, default=0.0)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class Recurring(Base):
