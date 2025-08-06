@@ -6,9 +6,66 @@ import curses
 import calendar
 from dataclasses import dataclass
 from bisect import bisect_left, bisect_right
+import re
 
 from .database import SessionLocal, init_db
 from .models import Transaction, Balance, Recurring
+
+_THEME_FG = (1000, 1000, 1000)
+_THEME_BG = (0, 0, 0)
+_THEME_FG_HEX = "#ffffff"
+_THEME_BG_HEX = "#000000"
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"#?([0-9a-fA-F]{6})", hex_color)
+    if not match:
+        raise ValueError("invalid hex color")
+    value = match.group(1)
+    r = int(value[0:2], 16)
+    g = int(value[2:4], 16)
+    b = int(value[4:6], 16)
+    return tuple(int(x / 255 * 1000) for x in (r, g, b))
+
+
+def _apply_theme(stdscr):
+    attr = 0
+    try:
+        curses.start_color()
+        if curses.can_change_color():
+            curses.init_color(1, *_THEME_FG)
+            curses.init_color(2, *_THEME_BG)
+            fg, bg = 1, 2
+        else:
+            fg, bg = curses.COLOR_WHITE, curses.COLOR_BLACK
+        curses.init_pair(1, fg, bg)
+        attr = curses.color_pair(1)
+        stdscr.bkgd(" ", attr)
+        stdscr.attron(attr)
+    except curses.error:
+        pass
+    return attr
+
+
+def set_theme() -> None:
+    """Prompt for foreground/background colors and update theme."""
+    global _THEME_FG, _THEME_BG, _THEME_FG_HEX, _THEME_BG_HEX
+    fg = text("Foreground color (#RRGGBB)", default=_THEME_FG_HEX)
+    if fg is None:
+        return
+    bg = text("Background color (#RRGGBB)", default=_THEME_BG_HEX)
+    if bg is None:
+        return
+    try:
+        _THEME_FG = _hex_to_rgb(fg)
+        _THEME_BG = _hex_to_rgb(bg)
+        _THEME_FG_HEX = fg
+        _THEME_BG_HEX = bg
+    except ValueError:
+        print("Invalid color codes.\n")
+        return
+    curses.wrapper(_apply_theme)
+    print("Theme updated.\n")
 
 FREQUENCIES = [
     "weekly",
@@ -61,6 +118,11 @@ def text(message, default=None):
     """Prompt the user for free-form text input using curses."""
 
     def _prompt(stdscr):
+        _apply_theme(stdscr)
+        try:
+            stdscr.erase()
+        except Exception:
+            pass
         curses.curs_set(1)
         stdscr.keypad(True)
         h, w = stdscr.getmaxyx()
@@ -523,6 +585,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
         index = 0
         curses.curs_set(0)
         stdscr.keypad(True)
+        base_attr = _apply_theme(stdscr)
 
         desc_w = len(initial_row.description)
         amt_w = len(f"{initial_row.amount:.2f}")
@@ -574,7 +637,9 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                     f"{r.description:<{desc_w}} | "
                     f"{r.amount:>{amt_w}.2f} | {r.running:>{run_w}.2f}"
                 )
-                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                attr = (
+                    curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                ) | base_attr
                 try:
                     stdscr.addnstr(i, 0, line, w - 1, attr)
                 except curses.error:
@@ -647,6 +712,7 @@ def scroll_menu(
         nonlocal index
         curses.curs_set(0)
         stdscr.keypad(True)
+        base_attr = _apply_theme(stdscr)
 
         footer_l = footer_left if footer_left is not None else date.today().isoformat()
         footer_r = footer_right if footer_right is not None else ""
@@ -671,7 +737,9 @@ def scroll_menu(
                 if line_idx >= len(entries):
                     break
                 line = entries[line_idx]
-                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                attr = (
+                    curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                ) | base_attr
                 try:
                     stdscr.addstr(i + offset, 0, line[: w - 1], attr)
                 except curses.error:
@@ -812,6 +880,7 @@ def main() -> None:
                 "Ledger",
                 "Set balance",
                 "Wants/Goals",
+                "Theme",
                 "Quit",
             ],
         )
@@ -829,6 +898,8 @@ def main() -> None:
             set_balance()
         elif choice == "Wants/Goals":
             wants_goals_menu()
+        elif choice == "Theme":
+            set_theme()
         else:
             break
 
