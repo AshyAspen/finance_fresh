@@ -214,7 +214,7 @@ def test_list_transactions_columns(monkeypatch):
 def test_select_uses_scroll_menu(monkeypatch):
     captured = {}
 
-    def fake_scroll(entries, index, header=None):
+    def fake_scroll(entries, index, header=None, **kwargs):
         captured["entries"] = entries
         captured["index"] = index
         captured["header"] = header

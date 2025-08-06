@@ -42,7 +42,15 @@ def select(message, choices, default=None):
         if default is not None and value == default:
             default_idx = idx
 
-    selected = scroll_menu(titles, default_idx, header=message)
+    with SessionLocal() as s:
+        bal = s.get(Balance, 1)
+        bal_amt = bal.amount if bal else 0.0
+    selected = scroll_menu(
+        titles,
+        default_idx,
+        header=message,
+        footer_right=f"{bal_amt:.2f}",
+    )
     return values[selected]
 
 
@@ -206,11 +214,14 @@ def edit_recurring(is_income: bool) -> None:
             for r in recs
         ]
         entries.append("Back")
+        bal = session.get(Balance, 1)
+        bal_amt = bal.amount if bal else 0.0
         idx = scroll_menu(
             entries,
             0,
             header="Edit income" if is_income else "Edit bills",
             footer_left="Select to edit, 'a' to add",
+             footer_right=f"{bal_amt:.2f}",
             allow_add=True,
         )
         if idx == -1:
@@ -614,6 +625,7 @@ def scroll_menu(
     height: int | None = None,
     header: str | None = None,
     footer_left: str | None = None,
+    footer_right: str | None = None,
     allow_add: bool = False,
 ):
     """Display ``entries`` in a curses-driven scrollable window.
@@ -629,12 +641,8 @@ def scroll_menu(
         curses.curs_set(0)
         stdscr.keypad(True)
 
-        bal_session = SessionLocal()
-        bal = bal_session.get(Balance, 1)
-        bal_amt = bal.amount if bal else 0.0
-        bal_session.close()
         footer_l = footer_left if footer_left is not None else date.today().isoformat()
-        footer_right = f"{bal_amt:.2f}"
+        footer_r = footer_right if footer_right is not None else ""
 
         while True:  # redraw loop
             h, w = stdscr.getmaxyx()
@@ -666,9 +674,9 @@ def scroll_menu(
                 stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
                 stdscr.addnstr(
                     h - 1,
-                    max(0, w - len(footer_right)),
-                    footer_right,
-                    len(footer_right),
+                    max(0, w - len(footer_r)),
+                    footer_r,
+                    len(footer_r),
                 )
             except curses.error:
                 pass
@@ -736,8 +744,10 @@ def ledger_view() -> None:
 
 def _info_screen(message: str) -> None:
     """Display a simple message screen inside curses."""
-
-    scroll_menu(["Back"], 0, header=message)
+    with SessionLocal() as s:
+        bal = s.get(Balance, 1)
+        bal_amt = bal.amount if bal else 0.0
+    scroll_menu(["Back"], 0, header=message, footer_right=f"{bal_amt:.2f}")
 
 
 def edit_wants_goals() -> None:
