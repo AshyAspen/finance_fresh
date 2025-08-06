@@ -905,8 +905,8 @@ def wants_goals_menu() -> None:
 
 def main() -> None:
     init_db()
-    curses.wrapper(_apply_theme)
     while True:
+        curses.wrapper(_apply_theme)
         choice = select(
             "Select an option",
             choices=[
