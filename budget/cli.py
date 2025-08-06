@@ -279,10 +279,11 @@ def set_balance() -> None:
     session = SessionLocal()
     bal = session.get(Balance, 1)
     if bal is None:
-        bal = Balance(id=1, amount=amount)
+        bal = Balance(id=1, amount=amount, timestamp=datetime.utcnow())
         session.add(bal)
     else:
         bal.amount = amount
+        bal.timestamp = datetime.utcnow()
     session.commit()
     session.close()
 
@@ -454,12 +455,25 @@ class LedgerRow:
 
 def ledger_rows(session):
     bal = session.get(Balance, 1)
-    running = bal.amount if bal else 0.0
+    bal_amt = bal.amount if bal else 0.0
+    bal_date = bal.timestamp.date() if bal and bal.timestamp else date.today()
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
+
+    def total_up_to(d: date) -> float:
+        total = 0.0
+        for t in txns:
+            if t.timestamp.date() <= d:
+                total += t.amount
+        for r in recs:
+            total += count_occurrences(r.start_date.date(), r.frequency, d) * r.amount
+        return total
+
+    offset = bal_amt - total_up_to(bal_date)
     txn_iter = iter(txns)
     next_txn = next(txn_iter, None)
     occurrences = [(r.start_date.date(), r) for r in recs]
+    running = 0.0
 
     while True:
         next_date = None
@@ -475,13 +489,13 @@ def ledger_rows(session):
             break
         if next_kind[0] == "txn":
             running += next_txn.amount
-            yield LedgerRow(next_date, next_txn.description, next_txn.amount, running)
+            yield LedgerRow(next_date, next_txn.description, next_txn.amount, running + offset)
             next_txn = next(txn_iter, None)
         else:
             idx = next_kind[1]
             occ_date, rec = occurrences[idx]
             running += rec.amount
-            yield LedgerRow(occ_date, rec.description, rec.amount, running)
+            yield LedgerRow(occ_date, rec.description, rec.amount, running + offset)
             occurrences[idx] = (advance_date(occ_date, rec.frequency), rec)
 
 
@@ -684,6 +698,7 @@ def ledger_view() -> None:
     session = SessionLocal()
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
+    bal_date = bal.timestamp.date() if bal and bal.timestamp else date.today()
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
     today = date.today()
@@ -696,15 +711,17 @@ def ledger_view() -> None:
         return
     start_date, start_desc, start_amt = start_ev
 
-    running = bal_amt
-    for t in txns:
-        if t.timestamp.date() <= start_date:
-            running += t.amount
-    for r in recs:
-        count = count_occurrences(r.start_date.date(), r.frequency, start_date)
-        running += count * r.amount
-    # running now includes amount at start_date; adjust to show balance after start_amt
-    start_running = running
+    def total_up_to(d: date) -> float:
+        total = 0.0
+        for t in txns:
+            if t.timestamp.date() <= d:
+                total += t.amount
+        for r in recs:
+            total += count_occurrences(r.start_date.date(), r.frequency, d) * r.amount
+        return total
+
+    offset = bal_amt - total_up_to(bal_date)
+    start_running = total_up_to(start_date) + offset
     initial_row = LedgerRow(start_date, start_desc, start_amt, start_running)
 
     def get_next(date_after):

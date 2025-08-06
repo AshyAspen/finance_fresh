@@ -124,15 +124,15 @@ def test_ledger_running_balance():
         session = Session()
         session.add_all(
             [
-                Balance(id=1, amount=100.0),
+                Balance(id=1, amount=100.0, timestamp=datetime(2023, 1, 2)),
                 Transaction(description="T1", amount=-10.0, timestamp=datetime(2023, 1, 1)),
-                Transaction(description="T2", amount=20.0, timestamp=datetime(2023, 1, 2)),
+                Transaction(description="T2", amount=20.0, timestamp=datetime(2023, 1, 3)),
             ]
         )
         session.commit()
         rows = list(cli.ledger_rows(session))
-        assert rows[0].running == 90.0
-        assert rows[1].running == 110.0
+        assert rows[0].running == 100.0
+        assert rows[1].running == 120.0
     finally:
         session.close()
         path.unlink()
@@ -144,7 +144,7 @@ def test_ledger_includes_recurring():
         session = Session()
         session.add_all(
             [
-                Balance(id=1, amount=0.0),
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
                 Recurring(
                     description="Rent",
                     amount=-50.0,
