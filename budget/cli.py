@@ -60,6 +60,14 @@ def text(message, default=None):
     def _prompt(stdscr):
         curses.curs_set(1)
         stdscr.keypad(True)
+        try:
+            stdscr.bkgd(" ")
+        except AttributeError:
+            pass
+        try:
+            stdscr.erase()
+        except AttributeError:
+            pass
         h, w = stdscr.getmaxyx()
         h = max(1, h)
         w = max(1, w)
@@ -78,6 +86,14 @@ def text(message, default=None):
             resp = b""
         finally:
             curses.noecho()
+            try:
+                stdscr.erase()
+            except AttributeError:
+                pass
+            try:
+                stdscr.refresh()
+            except AttributeError:
+                pass
         text = resp.decode()
         if text == "" and default is not None:
             return default
@@ -640,6 +656,10 @@ def scroll_menu(
         nonlocal index
         curses.curs_set(0)
         stdscr.keypad(True)
+        try:
+            stdscr.bkgd(" ")
+        except AttributeError:
+            pass
 
         footer_l = footer_left if footer_left is not None else date.today().isoformat()
         footer_r = footer_right if footer_right is not None else ""
