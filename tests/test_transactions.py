@@ -345,3 +345,61 @@ def test_scroll_menu_handles_curses_error(monkeypatch):
 
     index = cli.scroll_menu(["A", "B"], 0, header="hdr")
     assert index == 0
+
+
+def test_scroll_menu_quits_on_q(monkeypatch):
+    def fake_wrapper(func):
+        class FakeWin:
+            def getmaxyx(self):
+                return (24, 80)
+
+            def addnstr(self, *args, **kwargs):
+                pass
+
+            def addstr(self, *args, **kwargs):
+                pass
+
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def keypad(self, flag):
+                pass
+
+            def getch(self):
+                return ord("q")
+
+        return func(FakeWin())
+
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+
+    index = cli.scroll_menu(["A", "B"], 0)
+    assert index is None
+
+
+def test_select_returns_none_on_quit(monkeypatch):
+    def fake_scroll(entries, index, header=None, **kwargs):
+        return None
+
+    monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+
+    class DummySession:
+        def get(self, model, ident):
+            return None
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
+
+    result = cli.select("Pick", ["A", "B"])
+    assert result is None

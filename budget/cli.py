@@ -52,6 +52,8 @@ def select(message, choices, default=None):
         header=message,
         footer_right=f"{bal_amt:.2f}",
     )
+    if selected is None:
+        return None
     return values[selected]
 
 
@@ -696,6 +698,8 @@ def scroll_menu(
                 return index
             elif key == ord("a") and allow_add:
                 return -1
+            elif key == ord("q"):
+                return None
 
             if index < top:
                 top = index
