@@ -14,6 +14,7 @@ FREQUENCIES = [
     "weekly",
     "biweekly",
     "semi monthly",
+    "monthly",
     "quarterly",
     "semi annually",
     "annually",
@@ -314,6 +315,8 @@ def advance_date(d: date, freq: str) -> date:
         return d + timedelta(weeks=2)
     if freq == "semi monthly":
         return d + timedelta(days=15)
+    if freq == "monthly":
+        return add_months(d, 1)
     if freq == "quarterly":
         return add_months(d, 3)
     if freq == "semi annually":
@@ -330,6 +333,8 @@ def retreat_date(d: date, freq: str) -> date:
         return d - timedelta(weeks=2)
     if freq == "semi monthly":
         return d - timedelta(days=15)
+    if freq == "monthly":
+        return add_months(d, -1)
     if freq == "quarterly":
         return add_months(d, -3)
     if freq == "semi annually":
@@ -355,7 +360,7 @@ def occurrence_on_or_before(start: date, freq: str, target: date) -> date | None
     if freq == "semi monthly":
         days = (target - start).days // 15
         return start + timedelta(days=days * 15)
-    step_map = {"quarterly": 3, "semi annually": 6, "annually": 12}
+    step_map = {"monthly": 1, "quarterly": 3, "semi annually": 6, "annually": 12}
     step = step_map.get(freq)
     if step:
         months = months_between(start, target)
@@ -382,7 +387,7 @@ def occurrence_after(start: date, freq: str, after: date) -> date | None:
     if freq == "semi monthly":
         days = (after - start).days // 15 + 1
         return start + timedelta(days=days * 15)
-    step_map = {"quarterly": 3, "semi annually": 6, "annually": 12}
+    step_map = {"monthly": 1, "quarterly": 3, "semi annually": 6, "annually": 12}
     step = step_map.get(freq)
     if step:
         months = months_between(start, after)
@@ -400,7 +405,7 @@ def count_occurrences(start: date, freq: str, target: date) -> int:
         return (target - start).days // 14 + 1
     if freq == "semi monthly":
         return (target - start).days // 15 + 1
-    step_map = {"quarterly": 3, "semi annually": 6, "annually": 12}
+    step_map = {"monthly": 1, "quarterly": 3, "semi annually": 6, "annually": 12}
     step = step_map.get(freq)
     if step:
         months = months_between(start, target)

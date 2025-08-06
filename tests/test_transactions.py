@@ -179,6 +179,30 @@ def test_ledger_includes_recurring():
         path.unlink()
 
 
+def test_monthly_recurring_occurs_each_month():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 2))
+        assert rows[0].date == datetime(2023, 1, 1).date()
+        assert rows[1].date == datetime(2023, 2, 1).date()
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_list_transactions_columns(monkeypatch):
     Session, path = get_temp_session()
     try:
