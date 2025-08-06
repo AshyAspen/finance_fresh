@@ -1,11 +1,22 @@
 """Command-line interface for budget app."""
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import curses
+import calendar
+from dataclasses import dataclass
 
 from .database import SessionLocal, init_db
-from .models import Transaction, Balance
+from .models import Transaction, Balance, Recurring
+
+FREQUENCIES = [
+    "weekly",
+    "biweekly",
+    "semi monthly",
+    "quarterly",
+    "semi annually",
+    "annually",
+]
 
 
 def select(message, choices, default=None):
@@ -126,6 +137,44 @@ def add_transaction() -> None:
     print("Transaction recorded.\n")
 
 
+def add_recurring(is_income: bool) -> None:
+    """Prompt user for a recurring bill or income and persist it."""
+
+    name = text("Name")
+    if name is None:
+        return
+    date_str = text("Start date (YYYY-MM-DD)")
+    if date_str is None:
+        return
+    amount_str = text("Amount")
+    if amount_str is None:
+        return
+    freq = select("Frequency", FREQUENCIES)
+    try:
+        start = datetime.strptime(date_str, "%Y-%m-%d")
+        amount = float(amount_str)
+    except ValueError:
+        print("Invalid input.")
+        return
+    amount = abs(amount) if is_income else -abs(amount)
+    session = SessionLocal()
+    rec = Recurring(
+        description=name, amount=amount, start_date=start, frequency=freq
+    )
+    session.add(rec)
+    session.commit()
+    session.close()
+    print("Recurring item recorded.\n")
+
+
+def add_bill() -> None:
+    add_recurring(False)
+
+
+def add_income() -> None:
+    add_recurring(True)
+
+
 def edit_transaction(session, txn: Transaction) -> None:
     """Edit an existing transaction in-place."""
     form = transaction_form(txn.description, txn.timestamp, txn.amount)
@@ -186,46 +235,150 @@ def set_balance() -> None:
     session.close()
 
 
-def build_ledger_entries():
-    """Return formatted ledger entries and default index.
+def add_months(d: date, months: int) -> date:
+    month = d.month - 1 + months
+    year = d.year + month // 12
+    month = month % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
-    The returned list includes "Exit" at the beginning and end. The default
-    index highlights the most recent past transaction relative to today.
-    """
 
-    session = SessionLocal()
-    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
-    if not txns:
-        session.close()
-        return [], 0
+def advance_date(d: date, freq: str) -> date:
+    if freq == "weekly":
+        return d + timedelta(weeks=1)
+    if freq == "biweekly":
+        return d + timedelta(weeks=2)
+    if freq == "semi monthly":
+        return d + timedelta(days=15)
+    if freq == "quarterly":
+        return add_months(d, 3)
+    if freq == "semi annually":
+        return add_months(d, 6)
+    if freq == "annually":
+        return add_months(d, 12)
+    return d
+
+
+@dataclass
+class LedgerRow:
+    date: date
+    description: str
+    amount: float
+    running: float
+
+
+def ledger_rows(session):
     bal = session.get(Balance, 1)
-    base = bal.amount if bal else 0.0
-    running_values = []
-    running = base
-    for txn in txns:
-        running += txn.amount
-        running_values.append(running)
-    desc_w = max(len(t.description) for t in txns)
-    amt_w = max(len(f"{t.amount:.2f}") for t in txns)
-    run_w = max(len(f"{r:.2f}") for r in running_values)
-    entries = []
-    today = date.today()
-    today_idx = 0
-    running = base
-    for idx, txn in enumerate(txns):
-        running += txn.amount
-        date_str = txn.timestamp.strftime("%Y-%m-%d")
-        desc = f"{txn.description:<{desc_w}}"
-        amt = f"{txn.amount:>{amt_w}.2f}"
-        run = f"{running:>{run_w}.2f}"
-        entry = f"{date_str} | {desc} | {amt} | {run}"
-        entries.append(entry)
-        if txn.timestamp.date() <= today:
-            today_idx = idx
-    session.close()
-    choices = ["Exit"] + entries + ["Exit"]
-    default_idx = today_idx + 1  # account for leading Exit
-    return choices, default_idx
+    running = bal.amount if bal else 0.0
+    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
+    recs = session.query(Recurring).all()
+    txn_iter = iter(txns)
+    next_txn = next(txn_iter, None)
+    occurrences = [(r.start_date.date(), r) for r in recs]
+
+    while True:
+        next_date = None
+        next_kind = None
+        if next_txn is not None:
+            next_date = next_txn.timestamp.date()
+            next_kind = ("txn", next_txn)
+        for idx, (occ_date, rec) in enumerate(occurrences):
+            if next_date is None or occ_date <= next_date:
+                next_date = occ_date
+                next_kind = ("rec", idx)
+        if next_kind is None:
+            break
+        if next_kind[0] == "txn":
+            running += next_txn.amount
+            yield LedgerRow(next_date, next_txn.description, next_txn.amount, running)
+            next_txn = next(txn_iter, None)
+        else:
+            idx = next_kind[1]
+            occ_date, rec = occurrences[idx]
+            running += rec.amount
+            yield LedgerRow(occ_date, rec.description, rec.amount, running)
+            occurrences[idx] = (advance_date(occ_date, rec.frequency), rec)
+
+
+def ledger_curses(initial_rows, row_gen, bal_amt):
+    def _view(stdscr):
+        rows = list(initial_rows)
+        index = 0
+        curses.curs_set(0)
+        stdscr.keypad(True)
+
+        desc_w = max(len(r.description) for r in rows)
+        amt_w = max(len(f"{r.amount:.2f}") for r in rows)
+        run_w = max(len(f"{r.running:.2f}") for r in rows)
+        footer_left = date.today().isoformat()
+        footer_right = f"{bal_amt:.2f}"
+
+        while True:
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            visible = h - 1
+            top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
+
+            while len(rows) < top + visible:
+                try:
+                    row = next(row_gen)
+                except StopIteration:
+                    break
+                rows.append(row)
+                desc_w = max(desc_w, len(row.description))
+                amt_w = max(amt_w, len(f"{row.amount:.2f}"))
+                run_w = max(run_w, len(f"{row.running:.2f}"))
+
+            stdscr.erase()
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(rows):
+                    break
+                r = rows[line_idx]
+                line = (
+                    f"{r.date.strftime('%Y-%m-%d')} | "
+                    f"{r.description:<{desc_w}} | "
+                    f"{r.amount:>{amt_w}.2f} | {r.running:>{run_w}.2f}"
+                )
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
+
+            footer = f"{footer_left} | {footer_right}"
+            foot_x = max(0, w - len(footer))
+            try:
+                stdscr.addnstr(h - 1, foot_x, footer, max(0, w - foot_x))
+            except curses.error:
+                pass
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN:
+                index += 1
+                if index >= len(rows):
+                    try:
+                        row = next(row_gen)
+                    except StopIteration:
+                        index = len(rows) - 1
+                    else:
+                        rows.append(row)
+                        desc_w = max(desc_w, len(row.description))
+                        amt_w = max(amt_w, len(f"{row.amount:.2f}"))
+                        run_w = max(run_w, len(f"{row.running:.2f}"))
+            elif key == ord("q"):
+                break
+
+            if index < top:
+                top = index
+            elif index >= top + visible:
+                top = index - visible + 1
+
+    return curses.wrapper(_view)
 
 
 def scroll_menu(
@@ -307,14 +460,17 @@ def scroll_menu(
 def ledger_view() -> None:
     """Display a scrollable ledger as ``date | name | amount | balance``."""
 
-    entries, index = build_ledger_entries()
-    if not entries:
+    session = SessionLocal()
+    bal = session.get(Balance, 1)
+    bal_amt = bal.amount if bal else 0.0
+    row_gen = ledger_rows(session)
+    first = next(row_gen, None)
+    if first is None:
         print("No transactions recorded yet.\n")
+        session.close()
         return
-    while True:
-        index = scroll_menu(entries, index)
-        if entries[index] == "Exit":
-            break
+    session.close()
+    ledger_curses([first], row_gen, bal_amt)
 
 
 def _info_screen(message: str) -> None:
@@ -371,6 +527,8 @@ def main() -> None:
             choices=[
                 "Enter transaction",
                 "List transactions",
+                "Add bill",
+                "Add income",
                 "Ledger",
                 "Set balance",
                 "Wants/Goals",
@@ -381,6 +539,10 @@ def main() -> None:
             add_transaction()
         elif choice == "List transactions":
             list_transactions()
+        elif choice == "Add bill":
+            add_bill()
+        elif choice == "Add income":
+            add_income()
         elif choice == "Ledger":
             ledger_view()
         elif choice == "Set balance":

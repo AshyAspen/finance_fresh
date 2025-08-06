@@ -3,6 +3,7 @@ import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
+import itertools
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -11,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from budget import cli, database
-from budget.models import Transaction, Balance
+from budget.models import Transaction, Balance, Recurring
 
 
 def get_temp_session():
@@ -117,7 +118,7 @@ def test_set_balance(monkeypatch):
         path.unlink()
 
 
-def test_ledger_running_balance(monkeypatch):
+def test_ledger_running_balance():
     Session, path = get_temp_session()
     try:
         session = Session()
@@ -129,29 +130,35 @@ def test_ledger_running_balance(monkeypatch):
             ]
         )
         session.commit()
-        session.close()
-
-        captured = {}
-
-        def fake_scroll(entries, index, header=None):
-            captured["entries"] = entries
-            captured["index"] = index
-            captured["header"] = header
-            # return bottom "Exit" to exit immediately
-            return len(entries) - 1
-
-        monkeypatch.setattr(cli, "SessionLocal", Session)
-        monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
-        cli.ledger_view()
-
-        titles = captured["entries"]
-        assert titles[0] == "Exit"
-        assert titles[1] == "2023-01-01 | T1 | -10.00 |  90.00"
-        assert titles[2] == "2023-01-02 | T2 |  20.00 | 110.00"
-        assert titles[3] == "Exit"
-        assert captured["index"] == 2
-        assert captured["header"] is None
+        rows = list(cli.ledger_rows(session))
+        assert rows[0].running == 90.0
+        assert rows[1].running == 110.0
     finally:
+        session.close()
+        path.unlink()
+
+
+def test_ledger_includes_recurring():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="weekly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 2))
+        assert rows[0].date == datetime(2023, 1, 1).date()
+        assert rows[1].date == datetime(2023, 1, 8).date()
+    finally:
+        session.close()
         path.unlink()
 
 

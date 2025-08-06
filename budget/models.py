@@ -22,3 +22,15 @@ class Balance(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     amount = Column(Float, nullable=False, default=0.0)
+
+
+class Recurring(Base):
+    """A recurring bill or income entry."""
+
+    __tablename__ = "recurring"
+
+    id = Column(Integer, primary_key=True, index=True)
+    description = Column(String, nullable=False)
+    amount = Column(Float, nullable=False)
+    start_date = Column(DateTime, nullable=False)
+    frequency = Column(String, nullable=False)
