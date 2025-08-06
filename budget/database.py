@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # Determine database path; allow override with environment variable for testing
@@ -18,3 +18,12 @@ Base = declarative_base()
 def init_db() -> None:
     """Create database tables if they do not exist."""
     Base.metadata.create_all(engine)
+    # Ensure legacy databases gain the new balance timestamp column
+    with engine.begin() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(balance)"))]
+        if "timestamp" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE balance ADD COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+                )
+            )

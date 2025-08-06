@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime
 import itertools
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 # Ensure the project root is on the Python path
@@ -118,21 +118,38 @@ def test_set_balance(monkeypatch):
         path.unlink()
 
 
+def test_init_db_adds_balance_timestamp(tmp_path, monkeypatch):
+    # create legacy database lacking timestamp column
+    db_path = tmp_path / "legacy.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE balance (id INTEGER PRIMARY KEY, amount FLOAT NOT NULL DEFAULT 0.0)"))
+
+    # patch database engine to use legacy DB and run init_db
+    monkeypatch.setattr(database, "engine", engine)
+    database.init_db()
+
+    # verify timestamp column now exists
+    with engine.connect() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(balance)"))]
+        assert "timestamp" in cols
+
+
 def test_ledger_running_balance():
     Session, path = get_temp_session()
     try:
         session = Session()
         session.add_all(
             [
-                Balance(id=1, amount=100.0),
+                Balance(id=1, amount=100.0, timestamp=datetime(2023, 1, 2)),
                 Transaction(description="T1", amount=-10.0, timestamp=datetime(2023, 1, 1)),
-                Transaction(description="T2", amount=20.0, timestamp=datetime(2023, 1, 2)),
+                Transaction(description="T2", amount=20.0, timestamp=datetime(2023, 1, 3)),
             ]
         )
         session.commit()
         rows = list(cli.ledger_rows(session))
-        assert rows[0].running == 90.0
-        assert rows[1].running == 110.0
+        assert rows[0].running == 100.0
+        assert rows[1].running == 120.0
     finally:
         session.close()
         path.unlink()
@@ -144,7 +161,7 @@ def test_ledger_includes_recurring():
         session = Session()
         session.add_all(
             [
-                Balance(id=1, amount=0.0),
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
                 Recurring(
                     description="Rent",
                     amount=-50.0,
