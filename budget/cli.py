@@ -53,12 +53,44 @@ def _apply_theme(stdscr):
 def set_theme() -> None:
     """Prompt for foreground/background colors and update theme."""
     global _THEME_FG, _THEME_BG, _THEME_FG_HEX, _THEME_BG_HEX
-    fg = text("Foreground color (#RRGGBB)", default=_THEME_FG_HEX)
-    if fg is None:
-        return
-    bg = text("Background color (#RRGGBB)", default=_THEME_BG_HEX)
-    if bg is None:
-        return
+
+    def _prompt(stdscr):
+        _apply_theme(stdscr)
+
+        def ask(msg: str, default: str) -> str:
+            curses.curs_set(1)
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            prompt = f"{msg}" + (f" [{default}]" if default else "") + ": "
+            y = h // 2
+            x = max(0, (w - len(prompt)) // 2)
+            try:
+                stdscr.addnstr(y, x, prompt, max(0, w - x))
+            except curses.error:
+                pass
+            stdscr.refresh()
+            curses.echo()
+            try:
+                resp = stdscr.getstr(
+                    y, x + len(prompt), max(1, w - x - len(prompt) - 1)
+                )
+            except curses.error:
+                resp = b""
+            finally:
+                curses.noecho()
+            text = resp.decode()
+            if text == "" and default:
+                return default
+            return text
+
+        fg = ask("Foreground color (#RRGGBB)", _THEME_FG_HEX)
+        bg = ask("Background color (#RRGGBB)", _THEME_BG_HEX)
+        return fg, bg
+
+    fg, bg = curses.wrapper(_prompt)
+
     try:
         _THEME_FG = _hex_to_rgb(fg)
         _THEME_BG = _hex_to_rgb(bg)
@@ -67,6 +99,7 @@ def set_theme() -> None:
     except ValueError:
         print("Invalid color codes.\n")
         return
+
     curses.wrapper(_apply_theme)
     print("Theme updated.\n")
 
@@ -872,6 +905,7 @@ def wants_goals_menu() -> None:
 
 def main() -> None:
     init_db()
+    curses.wrapper(_apply_theme)
     while True:
         choice = select(
             "Select an option",
