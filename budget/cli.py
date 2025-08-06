@@ -35,13 +35,35 @@ def select(message, choices, default=None):
 
 
 def text(message, default=None):
-    """Prompt the user for free-form text input."""
+    """Prompt the user for free-form text input using curses."""
 
-    prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
-    response = input(prompt)
-    if response == "" and default is not None:
-        return default
-    return response
+    def _prompt(stdscr):
+        curses.curs_set(1)
+        stdscr.keypad(True)
+        h, w = stdscr.getmaxyx()
+        h = max(1, h)
+        w = max(1, w)
+        prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
+        y = h // 2
+        x = max(0, (w - len(prompt)) // 2)
+        try:
+            stdscr.addnstr(y, x, prompt, max(0, w - x))
+        except curses.error:
+            pass
+        stdscr.refresh()
+        curses.echo()
+        try:
+            resp = stdscr.getstr(y, x + len(prompt), max(1, w - x - len(prompt) - 1))
+        except curses.error:
+            resp = b""
+        finally:
+            curses.noecho()
+        text = resp.decode()
+        if text == "" and default is not None:
+            return default
+        return text
+
+    return curses.wrapper(_prompt)
 
 
 def transaction_form(
@@ -295,22 +317,28 @@ def ledger_view() -> None:
             break
 
 
+def _info_screen(message: str) -> None:
+    """Display a simple message screen inside curses."""
+
+    scroll_menu(["Back"], 0, header=message)
+
+
 def edit_wants_goals() -> None:
     """Placeholder for editing wants/goals."""
-    print("Edit wants/goals selected (feature not implemented).\n")
-    input("Press Enter to continue...")
+
+    _info_screen("Edit wants/goals (not implemented)")
 
 
 def toggle_wants_goals() -> None:
     """Placeholder for toggling wants/goals."""
-    print("Toggle wants/goals selected (feature not implemented).\n")
-    input("Press Enter to continue...")
+
+    _info_screen("Toggle wants/goals (not implemented)")
 
 
 def add_wants_goals() -> None:
     """Placeholder for adding wants/goals."""
-    print("Add wants/goals selected (feature not implemented).\n")
-    input("Press Enter to continue...")
+
+    _info_screen("Add wants/goals (not implemented)")
 
 
 def wants_goals_menu() -> None:

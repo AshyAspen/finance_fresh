@@ -206,3 +206,81 @@ def test_select_uses_scroll_menu(monkeypatch):
     assert captured["index"] == 1
     assert captured["header"] == "Pick"
     assert result == "b"
+
+
+def test_text_prompt_curses(monkeypatch):
+    responses = [b"hello", b""]
+
+    def fake_wrapper(func):
+        class FakeWin:
+            def __init__(self, resp):
+                self.resp = resp
+
+            def getmaxyx(self):
+                return (24, 80)
+
+            def addnstr(self, *args, **kwargs):
+                pass
+
+            def addstr(self, *args, **kwargs):
+                pass
+
+            def refresh(self):
+                pass
+
+            def keypad(self, flag):
+                pass
+
+            def getstr(self, y, x, n):
+                return self.resp
+
+        return func(FakeWin(responses.pop(0)))
+
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "echo", lambda: None)
+    monkeypatch.setattr(cli.curses, "noecho", lambda: None)
+
+    assert cli.text("Prompt") == "hello"
+    assert cli.text("Prompt", default="dflt") == "dflt"
+
+
+def test_scroll_menu_handles_curses_error(monkeypatch):
+    class DummySession:
+        def get(self, model, ident):
+            return None
+
+        def close(self):
+            pass
+
+    def fake_wrapper(func):
+        class FakeWin:
+            def getmaxyx(self):
+                return (0, 0)
+
+            def addnstr(self, *args, **kwargs):
+                raise cli.curses.error
+
+            def addstr(self, *args, **kwargs):
+                raise cli.curses.error
+
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def keypad(self, flag):
+                pass
+
+            def getch(self):
+                return 10  # Enter to select
+
+        return func(FakeWin())
+
+    monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+
+    index = cli.scroll_menu(["A", "B"], 0, header="hdr")
+    assert index == 0
