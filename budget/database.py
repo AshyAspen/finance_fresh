@@ -22,8 +22,7 @@ def init_db() -> None:
     with engine.begin() as conn:
         cols = [row[1] for row in conn.execute(text("PRAGMA table_info(balance)"))]
         if "timestamp" not in cols:
+            conn.execute(text("ALTER TABLE balance ADD COLUMN timestamp DATETIME"))
             conn.execute(
-                text(
-                    "ALTER TABLE balance ADD COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
-                )
+                text("UPDATE balance SET timestamp = CURRENT_TIMESTAMP WHERE timestamp IS NULL")
             )

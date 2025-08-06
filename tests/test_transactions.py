@@ -222,9 +222,22 @@ def test_select_uses_scroll_menu(monkeypatch):
 
     monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
 
-    result = cli.select(
-        "Pick", ["A", ("B title", "b"), "C"], default="b"
-    )
+    class DummySession:
+        def get(self, model, ident):
+            return None
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
+
+    result = cli.select("Pick", ["A", ("B title", "b"), "C"], default="b")
 
     assert captured["entries"] == ["A", "B title", "C"]
     assert captured["index"] == 1
