@@ -1,35 +1,8 @@
-import os
-import sys
-import tempfile
-from pathlib import Path
 from datetime import datetime
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-# Ensure the project root is on the Python path
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from budget import cli, database
+from tests.helpers import get_temp_session, make_prompt
+from budget import cli
 from budget.models import Goal
-
-
-def get_temp_session():
-    db_fd, db_path = tempfile.mkstemp()
-    os.close(db_fd)
-    engine = create_engine(f"sqlite:///{db_path}", future=True)
-    TestingSession = sessionmaker(bind=engine)
-    database.Base.metadata.create_all(engine)
-    return TestingSession, Path(db_path)
-
-
-def make_prompt(responses):
-    iterator = iter(responses)
-
-    def _prompt(*args, **kwargs):
-        return next(iterator)
-
-    return _prompt
 
 
 def test_add_goal(monkeypatch):
@@ -108,4 +81,3 @@ def test_wants_goals_menu_columns(monkeypatch):
         assert first[2].strip() == "on"
     finally:
         path.unlink()
-
