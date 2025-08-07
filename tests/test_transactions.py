@@ -13,6 +13,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from budget import cli, database
 from budget.models import Transaction, Balance, Recurring
+import pytest
 
 
 def get_temp_session():
@@ -320,16 +321,16 @@ def test_list_transactions_columns(monkeypatch):
 
         captured = {}
 
-        def fake_select(message, choices, default=None):
-            captured["choices"] = choices
+        def fake_scroll(entries, index, **kwargs):
+            captured["entries"] = entries
             return None
 
         monkeypatch.setattr(cli, "SessionLocal", Session)
-        monkeypatch.setattr(cli, "select", fake_select)
+        monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
 
         cli.list_transactions()
 
-        titles = [title for title, _ in captured["choices"]]
+        titles = captured["entries"]
         assert titles[0] == "2023-01-01 | Short  |  5.00"
         assert titles[1] == "2023-01-02 | Longer | -3.00"
         assert titles[2] == "Back"
@@ -406,6 +407,35 @@ def test_text_prompt_curses(monkeypatch):
 
     assert cli.text("Prompt") == "hello"
     assert cli.text("Prompt", default="dflt") == "dflt"
+
+
+def test_confirm_prompt_curses(monkeypatch):
+    keys = [10, ord("x")]
+
+    def fake_wrapper(func):
+        class FakeWin:
+            def getmaxyx(self):
+                return (24, 80)
+
+            def addnstr(self, *args, **kwargs):
+                pass
+
+            def refresh(self):
+                pass
+
+            def keypad(self, flag):
+                pass
+
+            def getch(self):
+                return keys.pop(0)
+
+        return func(FakeWin())
+
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+
+    assert cli.confirm("Sure?") is True
+    assert cli.confirm("Sure?") is False
 
 
 def test_scroll_menu_handles_curses_error(monkeypatch):
@@ -505,3 +535,67 @@ def test_select_returns_none_on_quit(monkeypatch):
 
     result = cli.select("Pick", ["A", "B"])
     assert result is None
+
+
+@pytest.mark.parametrize("is_income, amount", [(False, -10.0), (True, 10.0)])
+def test_delete_recurring(monkeypatch, is_income, amount):
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add(
+            Recurring(
+                description="R",
+                amount=amount,
+                start_date=datetime(2023, 1, 1),
+                frequency="monthly",
+            )
+        )
+        session.commit()
+        session.close()
+
+        responses = [("delete", 0), None]
+
+        def fake_scroll(entries, index, **kwargs):
+            return responses.pop(0)
+
+        monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "confirm", lambda msg: True)
+
+        cli.edit_recurring(is_income)
+
+        session = Session()
+        assert session.query(Recurring).count() == 0
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_delete_transaction(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add(
+            Transaction(
+                description="T",
+                amount=5.0,
+                timestamp=datetime(2023, 1, 1),
+            )
+        )
+        session.commit()
+        session.close()
+
+        def fake_scroll(entries, index, **kwargs):
+            return ("delete", 0)
+
+        monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "confirm", lambda msg: True)
+
+        cli.list_transactions()
+
+        session = Session()
+        assert session.query(Transaction).count() == 0
+    finally:
+        session.close()
+        path.unlink()
