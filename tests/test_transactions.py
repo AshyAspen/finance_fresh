@@ -376,34 +376,36 @@ def test_text_prompt_curses(monkeypatch):
     responses = [b"hello", b""]
 
     def fake_wrapper(func):
-        class FakeWin:
-            def __init__(self, resp):
-                self.resp = resp
-
+        class FakeStdScr:
             def getmaxyx(self):
                 return (24, 80)
 
-            def addnstr(self, *args, **kwargs):
+            def keypad(self, flag):
                 pass
 
-            def addstr(self, *args, **kwargs):
+        return func(FakeStdScr())
+
+    def fake_newwin(h, w, y, x):
+        class FakeWin:
+            def box(self):
+                pass
+
+            def addnstr(self, *args, **kwargs):
                 pass
 
             def refresh(self):
                 pass
 
-            def keypad(self, flag):
-                pass
-
             def getstr(self, y, x, n):
-                return self.resp
+                return responses.pop(0)
 
-        return func(FakeWin(responses.pop(0)))
+        return FakeWin()
 
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "echo", lambda: None)
     monkeypatch.setattr(cli.curses, "noecho", lambda: None)
+    monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
     assert cli.text("Prompt") == "hello"
     assert cli.text("Prompt", default="dflt") == "dflt"
@@ -413,9 +415,19 @@ def test_confirm_prompt_curses(monkeypatch):
     keys = [10, ord("x")]
 
     def fake_wrapper(func):
-        class FakeWin:
+        class FakeStdScr:
             def getmaxyx(self):
                 return (24, 80)
+
+            def keypad(self, flag):
+                pass
+
+        return func(FakeStdScr())
+
+    def fake_newwin(h, w, y, x):
+        class FakeWin:
+            def box(self):
+                pass
 
             def addnstr(self, *args, **kwargs):
                 pass
@@ -423,16 +435,14 @@ def test_confirm_prompt_curses(monkeypatch):
             def refresh(self):
                 pass
 
-            def keypad(self, flag):
-                pass
-
             def getch(self):
                 return keys.pop(0)
 
-        return func(FakeWin())
+        return FakeWin()
 
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
     assert cli.confirm("Sure?") is True
     assert cli.confirm("Sure?") is False

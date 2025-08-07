@@ -57,8 +57,21 @@ def select(message, choices, default=None):
     return values[selected]
 
 
+def _center_box(stdscr, height: int, width: int) -> "curses.window":
+    """Create a bordered window centered on ``stdscr``."""
+
+    h, w = stdscr.getmaxyx()
+    height = min(height, h)
+    width = min(width, w)
+    y = max(0, (h - height) // 2)
+    x = max(0, (w - width) // 2)
+    win = curses.newwin(height, width, y, x)
+    win.box()
+    return win
+
+
 def text(message, default=None):
-    """Prompt the user for free-form text input using curses."""
+    """Prompt the user for free-form text input using a boxed overlay."""
 
     def _prompt(stdscr):
         curses.curs_set(1)
@@ -66,25 +79,18 @@ def text(message, default=None):
         h, w = stdscr.getmaxyx()
         h = max(1, h)
         w = max(1, w)
-        try:
-            stdscr.erase()
-        except Exception:
-            for i in range(h):
-                try:
-                    stdscr.addnstr(i, 0, " " * w, w)
-                except curses.error:
-                    pass
         prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
-        y = h // 2
-        x = max(0, (w - len(prompt)) // 2)
+        input_width = max(1, min(40, w - len(prompt) - 6))
+        box_width = len(prompt) + input_width + 4
+        win = _center_box(stdscr, 3, box_width)
         try:
-            stdscr.addnstr(y, x, prompt, max(0, w - x))
+            win.addnstr(1, 2, prompt, box_width - 4)
         except curses.error:
             pass
-        stdscr.refresh()
+        win.refresh()
         curses.echo()
         try:
-            resp = stdscr.getstr(y, x + len(prompt), max(1, w - x - len(prompt) - 1))
+            resp = win.getstr(1, 2 + len(prompt), input_width)
         except curses.error:
             resp = b""
         finally:
@@ -98,29 +104,22 @@ def text(message, default=None):
 
 
 def confirm(message: str) -> bool:
-    """Prompt the user to confirm an action within curses.
-
-    Displays ``message`` centered on screen and waits for a keypress. Hitting
-    Enter confirms the action, while any other key cancels it.
-    """
+    """Prompt the user to confirm an action within a centered box."""
 
     def _prompt(stdscr):
         curses.curs_set(0)
         stdscr.keypad(True)
-        h, w = stdscr.getmaxyx()
-        h = max(1, h)
-        w = max(1, w)
-        prompt = (
-            f"{message} Press Enter to confirm, or any other key to cancel."
-        )
-        y = h // 2
-        x = max(0, (w - len(prompt)) // 2)
-        try:
-            stdscr.addnstr(y, x, prompt, max(0, w - x))
-        except curses.error:
-            pass
-        stdscr.refresh()
-        ch = stdscr.getch()
+        lines = [message, "Press Enter to confirm, or any other key to cancel."]
+        max_line = max(len(line) for line in lines)
+        win = _center_box(stdscr, len(lines) + 2, max_line + 4)
+        for idx, line in enumerate(lines):
+            x = (max_line - len(line)) // 2 + 2
+            try:
+                win.addnstr(1 + idx, x, line, max_line)
+            except curses.error:
+                pass
+        win.refresh()
+        ch = win.getch()
         return ch in (curses.KEY_ENTER, 10, 13)
 
     return curses.wrapper(_prompt)
