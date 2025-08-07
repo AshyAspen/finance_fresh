@@ -230,7 +230,7 @@ def test_list_transactions_columns(monkeypatch):
         titles = [title for title, _ in captured["choices"]]
         assert titles[0] == "2023-01-01 | Short  |  5.00"
         assert titles[1] == "2023-01-02 | Longer | -3.00"
-        assert titles[2] == "Back"
+        assert "Back" not in titles
     finally:
         path.unlink()
 

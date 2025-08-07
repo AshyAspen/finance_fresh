@@ -50,6 +50,7 @@ def select(message, choices, default=None):
         titles,
         default_idx,
         header=message,
+        footer_left="Press 'q' to go back",
         footer_right=f"{bal_amt:.2f}",
     )
     if selected is None:
@@ -216,15 +217,14 @@ def edit_recurring(is_income: bool) -> None:
             f"{r.start_date.strftime('%Y-%m-%d')} | {r.description:<{desc_w}} | {r.amount:>{amt_w}.2f}"
             for r in recs
         ]
-        entries.append("Back")
         bal = session.get(Balance, 1)
         bal_amt = bal.amount if bal else 0.0
         idx = scroll_menu(
             entries,
             0,
             header="Edit income" if is_income else "Edit bills",
-            footer_left="Select to edit, 'a' to add",
-             footer_right=f"{bal_amt:.2f}",
+            footer_left="Select to edit, 'a' to add, 'q' to go back",
+            footer_right=f"{bal_amt:.2f}",
             allow_add=True,
         )
         if idx == -1:
@@ -232,7 +232,7 @@ def edit_recurring(is_income: bool) -> None:
             add_recurring(is_income)
             session = SessionLocal()
             continue
-        if idx is None or idx >= len(recs):
+        if idx is None:
             break
         rec = recs[idx]
         session.close()
@@ -270,7 +270,6 @@ def list_transactions() -> None:
             )
             for t in txns
         ]
-        choices.append(("Back", None))
         choice = select("Select transaction to edit", choices)
         if choice is None:
             break
@@ -756,7 +755,7 @@ def _info_screen(message: str) -> None:
     with SessionLocal() as s:
         bal = s.get(Balance, 1)
         bal_amt = bal.amount if bal else 0.0
-    scroll_menu(["Back"], 0, header=message, footer_right=f"{bal_amt:.2f}")
+    scroll_menu([], 0, header=message, footer_left="Press 'q' to go back", footer_right=f"{bal_amt:.2f}")
 
 
 def edit_wants_goals() -> None:
@@ -786,17 +785,16 @@ def wants_goals_menu() -> None:
                 "Edit wants/goals",
                 "Toggle wants/goals",
                 "Add wants/goals",
-                "Back",
             ],
         )
+        if choice is None:
+            break
         if choice == "Edit wants/goals":
             edit_wants_goals()
         elif choice == "Toggle wants/goals":
             toggle_wants_goals()
         elif choice == "Add wants/goals":
             add_wants_goals()
-        else:
-            break
 
 
 def main() -> None:
