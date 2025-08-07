@@ -2,7 +2,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 import itertools
 
 from sqlalchemy import create_engine, text
@@ -200,6 +200,108 @@ def test_monthly_recurring_occurs_each_month():
         assert rows[1].date == datetime(2023, 2, 1).date()
     finally:
         session.close()
+        path.unlink()
+
+
+def test_multiple_events_same_day():
+    """Ledger supports multiple events on the same date."""
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 2),
+                    frequency="weekly",
+                ),
+                Transaction(
+                    description="Coffee",
+                    amount=-5.0,
+                    timestamp=datetime(2023, 1, 2, 8),
+                ),
+                Transaction(
+                    description="Lunch",
+                    amount=-10.0,
+                    timestamp=datetime(2023, 1, 2, 12),
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 3))
+        assert [r.description for r in rows] == [
+            "Rent",
+            "Coffee",
+            "Lunch",
+        ]
+        assert [r.running for r in rows] == [-50.0, -55.0, -65.0]
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_ledger_view_displays_all_events(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 2),
+                    frequency="weekly",
+                ),
+                Transaction(
+                    description="Coffee",
+                    amount=-5.0,
+                    timestamp=datetime(2023, 1, 2, 8),
+                ),
+                Transaction(
+                    description="Lunch",
+                    amount=-10.0,
+                    timestamp=datetime(2023, 1, 2, 12),
+                ),
+            ]
+        )
+        session.commit()
+        session.close()
+
+        captured = {}
+
+        def fake_curses(initial_row, get_prev, get_next, bal_amt):
+            rows = [initial_row]
+            while True:
+                prev = get_prev(rows[0].timestamp)
+                if prev is None:
+                    break
+                prev_row = cli.LedgerRow(
+                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
+                )
+                rows.insert(0, prev_row)
+                if len(rows) >= 3:
+                    break
+            captured["rows"] = rows
+
+        class FakeDate(date):
+            @classmethod
+            def today(cls):
+                return cls(2023, 1, 2)
+
+        monkeypatch.setattr(cli, "date", FakeDate)
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "ledger_curses", fake_curses)
+
+        cli.ledger_view()
+        assert [r.description for r in captured["rows"]] == [
+            "Rent",
+            "Coffee",
+            "Lunch",
+        ]
+    finally:
         path.unlink()
 
 
