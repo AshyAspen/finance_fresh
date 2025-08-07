@@ -22,16 +22,10 @@ FREQUENCIES = [
 
 
 def select(message, choices, default=None):
-    """Display a scrollable menu and return the selected value.
-
-    ``choices`` may be a list of strings or ``(title, value)`` pairs. The menu
-    is navigated with the arrow keys and the highlighted entry is returned when
-    the user presses Enter. ``default`` selects the initially highlighted value
-    if provided.
-    """
+    """Display ``choices`` in a centered box and return the selected value."""
 
     titles: list[str] = []
-    values = []
+    values: list[str] = []
     default_idx = 0
     for idx, choice in enumerate(choices):
         if isinstance(choice, tuple):
@@ -43,15 +37,40 @@ def select(message, choices, default=None):
         if default is not None and value == default:
             default_idx = idx
 
-    with SessionLocal() as s:
-        bal = s.get(Balance, 1)
-        bal_amt = bal.amount if bal else 0.0
-    selected = scroll_menu(
-        titles,
-        default_idx,
-        header=message,
-        footer_right=f"{bal_amt:.2f}",
-    )
+    max_line = max([len(message), *(len(t) for t in titles)])
+    height = len(titles) + 3
+    width = max_line + 4
+
+    def _prompt(stdscr):
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        win = _center_box(stdscr, height, width)
+        index = default_idx
+        while True:
+            win.erase()
+            win.box()
+            try:
+                win.addnstr(1, max(0, (width - len(message)) // 2), message, width - 2)
+            except curses.error:
+                pass
+            for i, title in enumerate(titles):
+                attr = curses.A_REVERSE if i == index else curses.A_NORMAL
+                try:
+                    win.addnstr(2 + i, 2, title, width - 4, attr)
+                except curses.error:
+                    pass
+            win.refresh()
+            key = win.getch()
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(titles) - 1:
+                index += 1
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return index
+            elif key in (ord("q"), 27):
+                return None
+
+    selected = curses.wrapper(_prompt)
     if selected is None:
         return None
     return values[selected]
@@ -390,11 +409,8 @@ def list_transactions() -> None:
     session = SessionLocal()
     while True:
         txns = session.query(Transaction).order_by(Transaction.timestamp).all()
-        if not txns:
-            print("No transactions recorded yet.\n")
-            break
-        desc_w = max(len(t.description) for t in txns)
-        amt_w = max(len(f"{t.amount:.2f}") for t in txns)
+        desc_w = max((len(t.description) for t in txns), default=0)
+        amt_w = max((len(f"{t.amount:.2f}") for t in txns), default=0)
         entries = [
             f"{t.timestamp.strftime('%Y-%m-%d')} | {t.description:<{desc_w}} | {t.amount:>{amt_w}.2f}"
             for t in txns
@@ -406,10 +422,16 @@ def list_transactions() -> None:
             entries,
             0,
             header="Select transaction to edit",
-            footer_left="Select to edit, 'd' to delete",
+            footer_left="Select to edit, 'a' to add, 'd' to delete",
             footer_right=f"{bal_amt:.2f}",
+            allow_add=True,
             allow_delete=True,
         )
+        if res == -1:
+            session.close()
+            add_transaction()
+            session = SessionLocal()
+            continue
         if isinstance(res, tuple) and res[0] == "delete":
             del_idx = res[1]
             if del_idx < len(txns):
@@ -1032,7 +1054,6 @@ def main() -> None:
         choice = select(
             "Select an option",
             choices=[
-                "Enter transaction",
                 "List transactions",
                 "Edit bills",
                 "Edit income",
@@ -1042,9 +1063,7 @@ def main() -> None:
                 "Quit",
             ],
         )
-        if choice == "Enter transaction":
-            add_transaction()
-        elif choice == "List transactions":
+        if choice == "List transactions":
             list_transactions()
         elif choice == "Edit bills":
             edit_recurring(False)

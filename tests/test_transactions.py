@@ -338,37 +338,43 @@ def test_list_transactions_columns(monkeypatch):
         path.unlink()
 
 
-def test_select_uses_scroll_menu(monkeypatch):
-    captured = {}
+def test_select_prompt_curses(monkeypatch):
+    keys = [10]
 
-    def fake_scroll(entries, index, header=None, **kwargs):
-        captured["entries"] = entries
-        captured["index"] = index
-        captured["header"] = header
-        return 1  # choose second item
+    def fake_wrapper(func):
+        class FakeStdScr:
+            def getmaxyx(self):
+                return (24, 80)
 
-    monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+            def keypad(self, flag):
+                pass
 
-    class DummySession:
-        def get(self, model, ident):
-            return None
+        return func(FakeStdScr())
 
-        def close(self):
-            pass
+    def fake_newwin(h, w, y, x):
+        class FakeWin:
+            def box(self):
+                pass
 
-        def __enter__(self):
-            return self
+            def erase(self):
+                pass
 
-        def __exit__(self, exc_type, exc, tb):
-            pass
+            def addnstr(self, *args, **kwargs):
+                pass
 
-    monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
+            def refresh(self):
+                pass
+
+            def getch(self):
+                return keys.pop(0)
+
+        return FakeWin()
+
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
     result = cli.select("Pick", ["A", ("B title", "b"), "C"], default="b")
-
-    assert captured["entries"] == ["A", "B title", "C"]
-    assert captured["index"] == 1
-    assert captured["header"] == "Pick"
     assert result == "b"
 
 
@@ -523,28 +529,42 @@ def test_scroll_menu_quits_on_q(monkeypatch):
 
 
 def test_select_returns_none_on_quit(monkeypatch):
-    def fake_scroll(entries, index, header=None, **kwargs):
-        return None
+    keys = [ord("q")]
 
-    monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+    def fake_wrapper(func):
+        class FakeStdScr:
+            def getmaxyx(self):
+                return (24, 80)
 
-    class DummySession:
-        def get(self, model, ident):
-            return None
+            def keypad(self, flag):
+                pass
 
-        def close(self):
-            pass
+        return func(FakeStdScr())
 
-        def __enter__(self):
-            return self
+    def fake_newwin(h, w, y, x):
+        class FakeWin:
+            def box(self):
+                pass
 
-        def __exit__(self, exc_type, exc, tb):
-            pass
+            def erase(self):
+                pass
 
-    monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
+            def addnstr(self, *args, **kwargs):
+                pass
 
-    result = cli.select("Pick", ["A", "B"])
-    assert result is None
+            def refresh(self):
+                pass
+
+            def getch(self):
+                return keys.pop(0)
+
+        return FakeWin()
+
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
+
+    assert cli.select("Pick", ["A", "B"]) is None
 
 
 @pytest.mark.parametrize("is_income, amount", [(False, -10.0), (True, 10.0)])
