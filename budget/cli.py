@@ -575,53 +575,73 @@ def count_occurrences(start: date, freq: str, target: date) -> int:
     return 1
 
 
-def next_event(after: datetime, txns, recs):
-    next_txn = None
-    txn_times = [t.timestamp for t in txns]
-    idx = bisect_right(txn_times, after)
-    if idx < len(txns):
-        next_txn = txns[idx]
-    next_rec = None
-    next_rec_time = None
+def next_event(after: datetime, txns, recs, last_desc: str = ""):
+    """Return the next event after ``after``.
+
+    ``last_desc`` is used to disambiguate multiple events that occur at the
+    same timestamp. When provided, events at ``after`` with descriptions less
+    than or equal to ``last_desc`` are skipped.
+    """
+
+    candidates: list[tuple[datetime, str, float]] = []
+
+    for t in txns:
+        if t.timestamp > after or (
+            t.timestamp == after and t.description > last_desc
+        ):
+            candidates.append((t.timestamp, t.description, t.amount))
+
     for r in recs:
-        occ = occurrence_after(r.start_date.date(), r.frequency, after.date())
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, after.date())
         if occ is None:
-            continue
-        occ_dt = datetime.combine(occ, datetime.min.time())
-        if next_rec_time is None or occ_dt < next_rec_time:
-            next_rec_time = occ_dt
-            next_rec = r
-    if next_txn is None and next_rec is None:
+            occ = r.start_date.date()
+        while True:
+            occ_dt = datetime.combine(occ, datetime.min.time())
+            if occ_dt > after or (occ_dt == after and r.description > last_desc):
+                candidates.append((occ_dt, r.description, r.amount))
+                break
+            occ = advance_date(occ, r.frequency)
+
+    if not candidates:
         return None
-    if next_txn is not None and (next_rec_time is None or next_txn.timestamp <= next_rec_time):
-        return next_txn.timestamp, next_txn.description, next_txn.amount
-    return next_rec_time, next_rec.description, next_rec.amount
+
+    return min(candidates, key=lambda x: (x[0], x[1]))
 
 
-def prev_event(before: datetime, txns, recs):
-    prev_txn = None
-    txn_times = [t.timestamp for t in txns]
-    idx = bisect_left(txn_times, before) - 1
-    if idx >= 0:
-        prev_txn = txns[idx]
-    prev_rec = None
-    prev_rec_time = None
+def prev_event(before: datetime, txns, recs, last_desc: str = "\uffff"):
+    """Return the event immediately before ``before``.
+
+    ``last_desc`` is the description of the current event when multiple events
+    share the same timestamp. Events at ``before`` with descriptions greater
+    than or equal to ``last_desc`` are skipped.
+    """
+
+    candidates: list[tuple[datetime, str, float]] = []
+
+    for t in txns:
+        if t.timestamp < before or (
+            t.timestamp == before and t.description < last_desc
+        ):
+            candidates.append((t.timestamp, t.description, t.amount))
+
     for r in recs:
-        target = before.date()
-        if before.time() == datetime.min.time():
-            target -= timedelta(days=1)
-        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, target)
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, before.date())
         if occ is None:
             continue
-        occ_dt = datetime.combine(occ, datetime.min.time())
-        if prev_rec_time is None or occ_dt > prev_rec_time:
-            prev_rec_time = occ_dt
-            prev_rec = r
-    if prev_txn is None and prev_rec is None:
+        while True:
+            occ_dt = datetime.combine(occ, datetime.min.time())
+            if occ_dt < before or (occ_dt == before and r.description < last_desc):
+                candidates.append((occ_dt, r.description, r.amount))
+                break
+            prev_occ = retreat_date(occ, r.frequency)
+            if prev_occ < r.start_date.date():
+                break
+            occ = prev_occ
+
+    if not candidates:
         return None
-    if prev_txn is not None and (prev_rec_time is None or prev_txn.timestamp >= prev_rec_time):
-        return prev_txn.timestamp, prev_txn.description, prev_txn.amount
-    return prev_rec_time, prev_rec.description, prev_rec.amount
+
+    return max(candidates, key=lambda x: (x[0], x[1]))
 
 
 @dataclass
@@ -641,7 +661,13 @@ def ledger_rows(session):
     bal_amt = bal.amount if bal else 0.0
     bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
-    recs = session.query(Recurring).all()
+    # Order recurring items deterministically so that multiple events on the
+    # same day appear in a stable order.
+    recs = (
+        session.query(Recurring)
+        .order_by(Recurring.start_date, Recurring.description)
+        .all()
+    )
 
     def total_up_to(ts: datetime) -> float:
         total = 0.0
@@ -665,7 +691,7 @@ def ledger_rows(session):
             next_ts = next_txn.timestamp
             next_kind = ("txn", next_txn)
         for idx, (occ_dt, rec) in enumerate(occurrences):
-            if next_ts is None or occ_dt <= next_ts:
+            if next_ts is None or occ_dt < next_ts:
                 next_ts = occ_dt
                 next_kind = ("rec", idx)
         if next_kind is None:
@@ -703,11 +729,11 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
             visible = h - 1
 
             while index < visible // 2:
-                prev = get_prev(rows[0].timestamp)
+                prev = get_prev(rows[0])
                 if prev is None:
                     break
                 prev_row = LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
+                    prev[0], prev[1], prev[2], rows[0].running - prev[2]
                 )
                 rows.insert(0, prev_row)
                 desc_w = max(desc_w, len(prev_row.description))
@@ -716,7 +742,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 index += 1
 
             while len(rows) < visible:
-                nxt = get_next(rows[-1].timestamp)
+                nxt = get_next(rows[-1])
                 if nxt is None:
                     break
                 next_row = LedgerRow(
@@ -763,10 +789,10 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 if index > 0:
                     index -= 1
                 else:
-                    prev = get_prev(rows[0].timestamp)
+                    prev = get_prev(rows[0])
                     if prev is not None:
                         prev_row = LedgerRow(
-                            prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
+                            prev[0], prev[1], prev[2], rows[0].running - prev[2]
                         )
                         rows.insert(0, prev_row)
                         desc_w = max(desc_w, len(prev_row.description))
@@ -776,7 +802,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 if index < len(rows) - 1:
                     index += 1
                 else:
-                    nxt = get_next(rows[-1].timestamp)
+                    nxt = get_next(rows[-1])
                     if nxt is not None:
                         next_row = LedgerRow(
                             nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
@@ -948,11 +974,11 @@ def ledger_view() -> None:
     start_running = total_up_to(start_ts) + offset
     initial_row = LedgerRow(start_ts, start_desc, start_amt, start_running)
 
-    def get_next(ts_after):
-        return next_event(ts_after, txns, recs)
+    def get_next(row):
+        return next_event(row.timestamp, txns, recs, row.description)
 
-    def get_prev(ts_before):
-        return prev_event(ts_before, txns, recs)
+    def get_prev(row):
+        return prev_event(row.timestamp, txns, recs, row.description)
 
     session.close()
     ledger_curses(initial_row, get_prev, get_next, bal_amt)

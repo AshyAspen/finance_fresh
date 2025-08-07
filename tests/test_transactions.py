@@ -204,8 +204,36 @@ def test_monthly_recurring_occurs_each_month():
         path.unlink()
 
 
+def test_recurring_income_propagates():
+    """Recurring income entries appear for future dates."""
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Salary",
+                    amount=100.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="weekly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 2))
+        assert [r.date for r in rows] == [
+            datetime(2023, 1, 1).date(),
+            datetime(2023, 1, 8).date(),
+        ]
+        assert [r.amount for r in rows] == [100.0, 100.0]
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_multiple_events_same_day():
-    """Ledger supports multiple events on the same date."""
+    """Ledger supports multiple recurring items and transactions on one date."""
     Session, path = get_temp_session()
     try:
         session = Session()
@@ -215,6 +243,12 @@ def test_multiple_events_same_day():
                 Recurring(
                     description="Rent",
                     amount=-50.0,
+                    start_date=datetime(2023, 1, 2),
+                    frequency="weekly",
+                ),
+                Recurring(
+                    description="Gym",
+                    amount=-20.0,
                     start_date=datetime(2023, 1, 2),
                     frequency="weekly",
                 ),
@@ -231,13 +265,14 @@ def test_multiple_events_same_day():
             ]
         )
         session.commit()
-        rows = list(itertools.islice(cli.ledger_rows(session), 3))
+        rows = list(itertools.islice(cli.ledger_rows(session), 4))
         assert [r.description for r in rows] == [
+            "Gym",
             "Rent",
             "Coffee",
             "Lunch",
         ]
-        assert [r.running for r in rows] == [-50.0, -55.0, -65.0]
+        assert [r.running for r in rows] == [-20.0, -70.0, -75.0, -85.0]
     finally:
         session.close()
         path.unlink()
@@ -253,6 +288,12 @@ def test_ledger_view_displays_all_events(monkeypatch):
                 Recurring(
                     description="Rent",
                     amount=-50.0,
+                    start_date=datetime(2023, 1, 2),
+                    frequency="weekly",
+                ),
+                Recurring(
+                    description="Gym",
+                    amount=-20.0,
                     start_date=datetime(2023, 1, 2),
                     frequency="weekly",
                 ),
@@ -276,14 +317,14 @@ def test_ledger_view_displays_all_events(monkeypatch):
         def fake_curses(initial_row, get_prev, get_next, bal_amt):
             rows = [initial_row]
             while True:
-                prev = get_prev(rows[0].timestamp)
+                prev = get_prev(rows[0])
                 if prev is None:
                     break
                 prev_row = cli.LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
+                    prev[0], prev[1], prev[2], rows[0].running - prev[2]
                 )
                 rows.insert(0, prev_row)
-                if len(rows) >= 3:
+                if len(rows) >= 4:
                     break
             captured["rows"] = rows
 
@@ -298,6 +339,7 @@ def test_ledger_view_displays_all_events(monkeypatch):
 
         cli.ledger_view()
         assert [r.description for r in captured["rows"]] == [
+            "Gym",
             "Rent",
             "Coffee",
             "Lunch",
