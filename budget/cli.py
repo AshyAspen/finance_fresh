@@ -57,8 +57,21 @@ def select(message, choices, default=None):
     return values[selected]
 
 
+def _center_box(stdscr, height: int, width: int) -> "curses.window":
+    """Create a bordered window centered on ``stdscr``."""
+
+    h, w = stdscr.getmaxyx()
+    height = min(height, h)
+    width = min(width, w)
+    y = max(0, (h - height) // 2)
+    x = max(0, (w - width) // 2)
+    win = curses.newwin(height, width, y, x)
+    win.box()
+    return win
+
+
 def text(message, default=None):
-    """Prompt the user for free-form text input using curses."""
+    """Prompt the user for free-form text input using a boxed overlay."""
 
     def _prompt(stdscr):
         curses.curs_set(1)
@@ -66,25 +79,18 @@ def text(message, default=None):
         h, w = stdscr.getmaxyx()
         h = max(1, h)
         w = max(1, w)
-        try:
-            stdscr.erase()
-        except Exception:
-            for i in range(h):
-                try:
-                    stdscr.addnstr(i, 0, " " * w, w)
-                except curses.error:
-                    pass
         prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
-        y = h // 2
-        x = max(0, (w - len(prompt)) // 2)
+        input_width = max(1, min(40, w - len(prompt) - 6))
+        box_width = len(prompt) + input_width + 4
+        win = _center_box(stdscr, 3, box_width)
         try:
-            stdscr.addnstr(y, x, prompt, max(0, w - x))
+            win.addnstr(1, 2, prompt, box_width - 4)
         except curses.error:
             pass
-        stdscr.refresh()
+        win.refresh()
         curses.echo()
         try:
-            resp = stdscr.getstr(y, x + len(prompt), max(1, w - x - len(prompt) - 1))
+            resp = win.getstr(1, 2 + len(prompt), input_width)
         except curses.error:
             resp = b""
         finally:
@@ -98,29 +104,22 @@ def text(message, default=None):
 
 
 def confirm(message: str) -> bool:
-    """Prompt the user to confirm an action within curses.
-
-    Displays ``message`` centered on screen and waits for a keypress. Hitting
-    Enter confirms the action, while any other key cancels it.
-    """
+    """Prompt the user to confirm an action within a centered box."""
 
     def _prompt(stdscr):
         curses.curs_set(0)
         stdscr.keypad(True)
-        h, w = stdscr.getmaxyx()
-        h = max(1, h)
-        w = max(1, w)
-        prompt = (
-            f"{message} Press Enter to confirm, or any other key to cancel."
-        )
-        y = h // 2
-        x = max(0, (w - len(prompt)) // 2)
-        try:
-            stdscr.addnstr(y, x, prompt, max(0, w - x))
-        except curses.error:
-            pass
-        stdscr.refresh()
-        ch = stdscr.getch()
+        lines = [message, "Press Enter to confirm, or any other key to cancel."]
+        max_line = max(len(line) for line in lines)
+        win = _center_box(stdscr, len(lines) + 2, max_line + 4)
+        for idx, line in enumerate(lines):
+            x = (max_line - len(line)) // 2 + 2
+            try:
+                win.addnstr(1 + idx, x, line, max_line)
+            except curses.error:
+                pass
+        win.refresh()
+        ch = win.getch()
         return ch in (curses.KEY_ENTER, 10, 13)
 
     return curses.wrapper(_prompt)
@@ -391,11 +390,8 @@ def list_transactions() -> None:
     session = SessionLocal()
     while True:
         txns = session.query(Transaction).order_by(Transaction.timestamp).all()
-        if not txns:
-            print("No transactions recorded yet.\n")
-            break
-        desc_w = max(len(t.description) for t in txns)
-        amt_w = max(len(f"{t.amount:.2f}") for t in txns)
+        desc_w = max((len(t.description) for t in txns), default=0)
+        amt_w = max((len(f"{t.amount:.2f}") for t in txns), default=0)
         entries = [
             f"{t.timestamp.strftime('%Y-%m-%d')} | {t.description:<{desc_w}} | {t.amount:>{amt_w}.2f}"
             for t in txns
@@ -407,8 +403,9 @@ def list_transactions() -> None:
             entries,
             0,
             header="Select transaction to edit",
-            footer_left="Select to edit, 'd' to delete",
+            footer_left="Select to edit, 'a' to add, 'd' to delete",
             footer_right=f"{bal_amt:.2f}",
+            allow_add=True,
             allow_delete=True,
         )
         if isinstance(res, tuple) and res[0] == "delete":
@@ -418,9 +415,18 @@ def list_transactions() -> None:
                 if confirm("Delete this transaction?"):
                     session.delete(txn)
                     session.commit()
+            session.close()
+            session = SessionLocal()
+            continue
+        if res == -1:
+            session.close()
+            add_transaction()
+            session = SessionLocal()
             continue
         idx = res
         if idx is None or idx >= len(txns):
+            if not txns:
+                print("No transactions recorded yet.\n")
             break
         txn = txns[idx]
         edit_transaction(session, txn)
@@ -793,13 +799,7 @@ def scroll_menu(
     allow_add: bool = False,
     allow_delete: bool = False,
 ):
-    """Display ``entries`` in a curses-driven scrollable window.
-
-    A footer is rendered on the bottom line that shows today's date and the
-    stored account balance in the lower-right corner. When ``height`` is not
-    provided the list fills the available screen height; otherwise it is limited
-    to the given number of rows.
-    """
+    """Display ``entries`` in a bordered, centered scrollable window."""
 
     def _menu(stdscr):
         nonlocal index
@@ -809,19 +809,26 @@ def scroll_menu(
         footer_l = footer_left if footer_left is not None else date.today().isoformat()
         footer_r = footer_right if footer_right is not None else ""
 
+        max_entry_len = max((len(e) for e in entries), default=0)
+        base_width = max(max_entry_len, len(header or ""), len(footer_l) + len(footer_r) + 1)
+
         while True:  # redraw loop
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
             offset = 1 if header else 0
-            visible = min(len(entries), height or (h - 1 - offset))
+            max_visible = max(1, h - 3 - offset)
+            visible = min(len(entries), height or max_visible)
             top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
 
-            stdscr.erase()
+            content_width = min(base_width, w - 4)
+            total_height = visible + offset + 3
+            win = _center_box(stdscr, total_height, content_width + 4)
+
             if header:
-                head_x = max(0, (w - len(header)) // 2)
+                head_x = max(0, (content_width - len(header)) // 2)
                 try:
-                    stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                    win.addnstr(1, head_x + 2, header, content_width)
                 except curses.error:
                     pass
             for i in range(visible):
@@ -831,23 +838,23 @@ def scroll_menu(
                 line = entries[line_idx]
                 attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
                 try:
-                    stdscr.addstr(i + offset, 0, line[: w - 1], attr)
+                    win.addnstr(1 + offset + i, 2, line, content_width, attr)
                 except curses.error:
                     pass
 
             try:
-                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
-                stdscr.addnstr(
-                    h - 1,
-                    max(0, w - len(footer_r)),
+                win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
+                win.addnstr(
+                    total_height - 2,
+                    2 + max(0, content_width - len(footer_r)),
                     footer_r,
                     len(footer_r),
                 )
             except curses.error:
                 pass
-            stdscr.refresh()
+            win.refresh()
 
-            key = stdscr.getch()
+            key = win.getch()
             if key == curses.KEY_UP and index > 0:
                 index -= 1
             elif key == curses.KEY_DOWN and index < len(entries) - 1:
@@ -1033,7 +1040,6 @@ def main() -> None:
         choice = select(
             "Select an option",
             choices=[
-                "Enter transaction",
                 "List transactions",
                 "Edit bills",
                 "Edit income",
@@ -1043,9 +1049,7 @@ def main() -> None:
                 "Quit",
             ],
         )
-        if choice == "Enter transaction":
-            add_transaction()
-        elif choice == "List transactions":
+        if choice == "List transactions":
             list_transactions()
         elif choice == "Edit bills":
             edit_recurring(False)

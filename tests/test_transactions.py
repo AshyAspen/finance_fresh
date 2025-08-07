@@ -323,6 +323,7 @@ def test_list_transactions_columns(monkeypatch):
 
         def fake_scroll(entries, index, **kwargs):
             captured["entries"] = entries
+            captured["kwargs"] = kwargs
             return None
 
         monkeypatch.setattr(cli, "SessionLocal", Session)
@@ -334,6 +335,8 @@ def test_list_transactions_columns(monkeypatch):
         assert titles[0] == "2023-01-01 | Short  |  5.00"
         assert titles[1] == "2023-01-02 | Longer | -3.00"
         assert titles[2] == "Back"
+        assert captured["kwargs"]["allow_add"] is True
+        assert captured["kwargs"]["allow_delete"] is True
     finally:
         path.unlink()
 
@@ -376,34 +379,36 @@ def test_text_prompt_curses(monkeypatch):
     responses = [b"hello", b""]
 
     def fake_wrapper(func):
-        class FakeWin:
-            def __init__(self, resp):
-                self.resp = resp
-
+        class FakeStdScr:
             def getmaxyx(self):
                 return (24, 80)
 
-            def addnstr(self, *args, **kwargs):
+            def keypad(self, flag):
                 pass
 
-            def addstr(self, *args, **kwargs):
+        return func(FakeStdScr())
+
+    def fake_newwin(h, w, y, x):
+        class FakeWin:
+            def box(self):
+                pass
+
+            def addnstr(self, *args, **kwargs):
                 pass
 
             def refresh(self):
                 pass
 
-            def keypad(self, flag):
-                pass
-
             def getstr(self, y, x, n):
-                return self.resp
+                return responses.pop(0)
 
-        return func(FakeWin(responses.pop(0)))
+        return FakeWin()
 
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "echo", lambda: None)
     monkeypatch.setattr(cli.curses, "noecho", lambda: None)
+    monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
     assert cli.text("Prompt") == "hello"
     assert cli.text("Prompt", default="dflt") == "dflt"
@@ -413,9 +418,19 @@ def test_confirm_prompt_curses(monkeypatch):
     keys = [10, ord("x")]
 
     def fake_wrapper(func):
-        class FakeWin:
+        class FakeStdScr:
             def getmaxyx(self):
                 return (24, 80)
+
+            def keypad(self, flag):
+                pass
+
+        return func(FakeStdScr())
+
+    def fake_newwin(h, w, y, x):
+        class FakeWin:
+            def box(self):
+                pass
 
             def addnstr(self, *args, **kwargs):
                 pass
@@ -423,16 +438,14 @@ def test_confirm_prompt_curses(monkeypatch):
             def refresh(self):
                 pass
 
-            def keypad(self, flag):
-                pass
-
             def getch(self):
                 return keys.pop(0)
 
-        return func(FakeWin())
+        return FakeWin()
 
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
     assert cli.confirm("Sure?") is True
     assert cli.confirm("Sure?") is False
@@ -469,11 +482,15 @@ def test_scroll_menu_handles_curses_error(monkeypatch):
             def getch(self):
                 return 10  # Enter to select
 
+            def box(self):
+                pass
+
         return func(FakeWin())
 
     monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "newwin", lambda *args, **kwargs: fake_wrapper(lambda w: w))
 
     index = cli.scroll_menu(["A", "B"], 0, header="hdr")
     assert index == 0
@@ -503,10 +520,14 @@ def test_scroll_menu_quits_on_q(monkeypatch):
             def getch(self):
                 return ord("q")
 
+            def box(self):
+                pass
+
         return func(FakeWin())
 
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "newwin", lambda *args, **kwargs: fake_wrapper(lambda w: w))
 
     index = cli.scroll_menu(["A", "B"], 0)
     assert index is None
@@ -598,4 +619,39 @@ def test_delete_transaction(monkeypatch):
         assert session.query(Transaction).count() == 0
     finally:
         session.close()
+        path.unlink()
+
+
+def test_add_transaction_from_list(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add(
+            Transaction(
+                description="T",
+                amount=5.0,
+                timestamp=datetime(2023, 1, 1),
+            )
+        )
+        session.commit()
+        session.close()
+
+        responses = iter([-1, None])
+
+        def fake_scroll(entries, index, **kwargs):
+            return next(responses)
+
+        called = {}
+
+        def fake_add():
+            called["added"] = True
+
+        monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "add_transaction", fake_add)
+
+        cli.list_transactions()
+
+        assert called.get("added") is True
+    finally:
         path.unlink()
