@@ -66,6 +66,14 @@ def text(message, default=None):
         h, w = stdscr.getmaxyx()
         h = max(1, h)
         w = max(1, w)
+        try:
+            stdscr.erase()
+        except Exception:
+            for i in range(h):
+                try:
+                    stdscr.addnstr(i, 0, " " * w, w)
+                except curses.error:
+                    pass
         prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
         y = h // 2
         x = max(0, (w - len(prompt)) // 2)
