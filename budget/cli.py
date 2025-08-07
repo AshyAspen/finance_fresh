@@ -21,13 +21,14 @@ FREQUENCIES = [
 ]
 
 
-def select(message, choices, default=None):
+def select(message, choices, default=None, boxed=True):
     """Display a scrollable menu and return the selected value.
 
     ``choices`` may be a list of strings or ``(title, value)`` pairs. The menu
     is navigated with the arrow keys and the highlighted entry is returned when
     the user presses Enter. ``default`` selects the initially highlighted value
-    if provided.
+    if provided. ``boxed`` renders the menu inside a centered bordered window
+    when ``True``.
     """
 
     titles: list[str] = []
@@ -51,6 +52,7 @@ def select(message, choices, default=None):
         default_idx,
         header=message,
         footer_right=f"{bal_amt:.2f}",
+        boxed=boxed,
     )
     if selected is None:
         return None
@@ -798,8 +800,13 @@ def scroll_menu(
     footer_right: str | None = None,
     allow_add: bool = False,
     allow_delete: bool = False,
+    boxed: bool = False,
 ):
-    """Display ``entries`` in a bordered, centered scrollable window."""
+    """Display ``entries`` in a scrollable window.
+
+    When ``boxed`` is ``True`` the list appears in a centered bordered overlay;
+    otherwise it fills the available screen.
+    """
 
     def _menu(stdscr):
         nonlocal index
@@ -810,51 +817,88 @@ def scroll_menu(
         footer_r = footer_right if footer_right is not None else ""
 
         max_entry_len = max((len(e) for e in entries), default=0)
-        base_width = max(max_entry_len, len(header or ""), len(footer_l) + len(footer_r) + 1)
+        base_width = max(
+            max_entry_len, len(header or ""), len(footer_l) + len(footer_r) + 1
+        )
 
-        while True:  # redraw loop
+        while True:
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
             offset = 1 if header else 0
-            max_visible = max(1, h - 3 - offset)
-            visible = min(len(entries), height or max_visible)
+            if boxed:
+                max_visible = max(1, h - 3 - offset)
+                visible = min(len(entries), height or max_visible)
+            else:
+                visible = min(len(entries), height or (h - 1 - offset))
             top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
 
-            content_width = min(base_width, w - 4)
-            total_height = visible + offset + 3
-            win = _center_box(stdscr, total_height, content_width + 4)
+            if boxed:
+                content_width = min(base_width, w - 4)
+                total_height = visible + offset + 3
+                win = _center_box(stdscr, total_height, content_width + 4)
 
-            if header:
-                head_x = max(0, (content_width - len(header)) // 2)
+                if header:
+                    head_x = max(0, (content_width - len(header)) // 2)
+                    try:
+                        win.addnstr(1, head_x + 2, header, content_width)
+                    except curses.error:
+                        pass
+                for i in range(visible):
+                    line_idx = top + i
+                    if line_idx >= len(entries):
+                        break
+                    line = entries[line_idx]
+                    attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                    try:
+                        win.addnstr(1 + offset + i, 2, line, content_width, attr)
+                    except curses.error:
+                        pass
+
                 try:
-                    win.addnstr(1, head_x + 2, header, content_width)
+                    win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
+                    win.addnstr(
+                        total_height - 2,
+                        2 + max(0, content_width - len(footer_r)),
+                        footer_r,
+                        len(footer_r),
+                    )
                 except curses.error:
                     pass
-            for i in range(visible):
-                line_idx = top + i
-                if line_idx >= len(entries):
-                    break
-                line = entries[line_idx]
-                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                win.refresh()
+                key = win.getch()
+            else:
+                stdscr.erase()
+                if header:
+                    head_x = max(0, (w - len(header)) // 2)
+                    try:
+                        stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                    except curses.error:
+                        pass
+                for i in range(visible):
+                    line_idx = top + i
+                    if line_idx >= len(entries):
+                        break
+                    line = entries[line_idx]
+                    attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                    try:
+                        stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                    except curses.error:
+                        pass
+
                 try:
-                    win.addnstr(1 + offset + i, 2, line, content_width, attr)
+                    stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                    stdscr.addnstr(
+                        h - 1,
+                        max(0, w - len(footer_r)),
+                        footer_r,
+                        len(footer_r),
+                    )
                 except curses.error:
                     pass
+                stdscr.refresh()
+                key = stdscr.getch()
 
-            try:
-                win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
-                win.addnstr(
-                    total_height - 2,
-                    2 + max(0, content_width - len(footer_r)),
-                    footer_r,
-                    len(footer_r),
-                )
-            except curses.error:
-                pass
-            win.refresh()
-
-            key = win.getch()
             if key == curses.KEY_UP and index > 0:
                 index -= 1
             elif key == curses.KEY_DOWN and index < len(entries) - 1:
@@ -867,11 +911,6 @@ def scroll_menu(
                 return ("delete", index)
             elif key == ord("q"):
                 return None
-
-            if index < top:
-                top = index
-            elif index >= top + visible:
-                top = index - visible + 1
 
     return curses.wrapper(_menu)
 
@@ -1048,6 +1087,7 @@ def main() -> None:
                 "Wants/Goals",
                 "Quit",
             ],
+            boxed=False,
         )
         if choice == "List transactions":
             list_transactions()

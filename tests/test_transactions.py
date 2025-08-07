@@ -337,6 +337,7 @@ def test_list_transactions_columns(monkeypatch):
         assert titles[2] == "Back"
         assert captured["kwargs"]["allow_add"] is True
         assert captured["kwargs"]["allow_delete"] is True
+        assert captured["kwargs"].get("boxed", False) is False
     finally:
         path.unlink()
 
@@ -348,6 +349,7 @@ def test_select_uses_scroll_menu(monkeypatch):
         captured["entries"] = entries
         captured["index"] = index
         captured["header"] = header
+        captured["boxed"] = kwargs.get("boxed")
         return 1  # choose second item
 
     monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
@@ -372,6 +374,7 @@ def test_select_uses_scroll_menu(monkeypatch):
     assert captured["entries"] == ["A", "B title", "C"]
     assert captured["index"] == 1
     assert captured["header"] == "Pick"
+    assert captured["boxed"] is True
     assert result == "b"
 
 
@@ -655,3 +658,18 @@ def test_add_transaction_from_list(monkeypatch):
         assert called.get("added") is True
     finally:
         path.unlink()
+
+
+def test_main_menu_not_boxed(monkeypatch):
+    captured = {}
+
+    def fake_select(message, choices, default=None, boxed=True):
+        captured["boxed"] = boxed
+        return "Quit"
+
+    monkeypatch.setattr(cli, "select", fake_select)
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+
+    cli.main()
+
+    assert captured.get("boxed") is False
