@@ -89,6 +89,17 @@ def text(message, default=None):
     return curses.wrapper(_prompt)
 
 
+def confirm(message: str) -> bool:
+    """Prompt the user to confirm an action.
+
+    Returns ``True`` if the user hits Enter without typing anything, otherwise
+    ``False``.
+    """
+
+    resp = input(f"{message} Press Enter to confirm, or any other key to cancel: ")
+    return resp == ""
+
+
 def transaction_form(
     description: str, timestamp: datetime, amount: float
 ):
@@ -219,14 +230,26 @@ def edit_recurring(is_income: bool) -> None:
         entries.append("Back")
         bal = session.get(Balance, 1)
         bal_amt = bal.amount if bal else 0.0
-        idx = scroll_menu(
+        res = scroll_menu(
             entries,
             0,
             header="Edit income" if is_income else "Edit bills",
-            footer_left="Select to edit, 'a' to add",
-             footer_right=f"{bal_amt:.2f}",
+            footer_left="Select to edit, 'a' to add, 'd' to delete",
+            footer_right=f"{bal_amt:.2f}",
             allow_add=True,
+            allow_delete=True,
         )
+        if isinstance(res, tuple) and res[0] == "delete":
+            del_idx = res[1]
+            if del_idx < len(recs):
+                rec = recs[del_idx]
+                if confirm("Delete this item?"):
+                    session.delete(rec)
+                    session.commit()
+            session.close()
+            session = SessionLocal()
+            continue
+        idx = res
         if idx == -1:
             session.close()
             add_recurring(is_income)
@@ -263,20 +286,34 @@ def list_transactions() -> None:
             break
         desc_w = max(len(t.description) for t in txns)
         amt_w = max(len(f"{t.amount:.2f}") for t in txns)
-        choices = [
-            (
-                f"{t.timestamp.strftime('%Y-%m-%d')} | {t.description:<{desc_w}} | {t.amount:>{amt_w}.2f}",
-                t.id,
-            )
+        entries = [
+            f"{t.timestamp.strftime('%Y-%m-%d')} | {t.description:<{desc_w}} | {t.amount:>{amt_w}.2f}"
             for t in txns
         ]
-        choices.append(("Back", None))
-        choice = select("Select transaction to edit", choices)
-        if choice is None:
+        entries.append("Back")
+        bal = session.get(Balance, 1)
+        bal_amt = bal.amount if bal else 0.0
+        res = scroll_menu(
+            entries,
+            0,
+            header="Select transaction to edit",
+            footer_left="Select to edit, 'd' to delete",
+            footer_right=f"{bal_amt:.2f}",
+            allow_delete=True,
+        )
+        if isinstance(res, tuple) and res[0] == "delete":
+            del_idx = res[1]
+            if del_idx < len(txns):
+                txn = txns[del_idx]
+                if confirm("Delete this transaction?"):
+                    session.delete(txn)
+                    session.commit()
+            continue
+        idx = res
+        if idx is None or idx >= len(txns):
             break
-        txn = session.get(Transaction, choice)
-        if txn is not None:
-            edit_transaction(session, txn)
+        txn = txns[idx]
+        edit_transaction(session, txn)
     session.close()
 
 
@@ -634,6 +671,7 @@ def scroll_menu(
     footer_left: str | None = None,
     footer_right: str | None = None,
     allow_add: bool = False,
+    allow_delete: bool = False,
 ):
     """Display ``entries`` in a curses-driven scrollable window.
 
@@ -698,6 +736,8 @@ def scroll_menu(
                 return index
             elif key == ord("a") and allow_add:
                 return -1
+            elif key == ord("d") and allow_delete:
+                return ("delete", index)
             elif key == ord("q"):
                 return None
 
