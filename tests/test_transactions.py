@@ -307,6 +307,35 @@ def test_text_prompt_curses(monkeypatch):
     assert cli.text("Prompt", default="dflt") == "dflt"
 
 
+def test_confirm_prompt_curses(monkeypatch):
+    keys = [10, ord("x")]
+
+    def fake_wrapper(func):
+        class FakeWin:
+            def getmaxyx(self):
+                return (24, 80)
+
+            def addnstr(self, *args, **kwargs):
+                pass
+
+            def refresh(self):
+                pass
+
+            def keypad(self, flag):
+                pass
+
+            def getch(self):
+                return keys.pop(0)
+
+        return func(FakeWin())
+
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+
+    assert cli.confirm("Sure?") is True
+    assert cli.confirm("Sure?") is False
+
+
 def test_scroll_menu_handles_curses_error(monkeypatch):
     class DummySession:
         def get(self, model, ident):

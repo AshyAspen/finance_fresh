@@ -90,14 +90,32 @@ def text(message, default=None):
 
 
 def confirm(message: str) -> bool:
-    """Prompt the user to confirm an action.
+    """Prompt the user to confirm an action within curses.
 
-    Returns ``True`` if the user hits Enter without typing anything, otherwise
-    ``False``.
+    Displays ``message`` centered on screen and waits for a keypress. Hitting
+    Enter confirms the action, while any other key cancels it.
     """
 
-    resp = input(f"{message} Press Enter to confirm, or any other key to cancel: ")
-    return resp == ""
+    def _prompt(stdscr):
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        h, w = stdscr.getmaxyx()
+        h = max(1, h)
+        w = max(1, w)
+        prompt = (
+            f"{message} Press Enter to confirm, or any other key to cancel."
+        )
+        y = h // 2
+        x = max(0, (w - len(prompt)) // 2)
+        try:
+            stdscr.addnstr(y, x, prompt, max(0, w - x))
+        except curses.error:
+            pass
+        stdscr.refresh()
+        ch = stdscr.getch()
+        return ch in (curses.KEY_ENTER, 10, 13)
+
+    return curses.wrapper(_prompt)
 
 
 def transaction_form(
