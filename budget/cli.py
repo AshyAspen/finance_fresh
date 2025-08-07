@@ -69,6 +69,7 @@ def _center_box(stdscr, height: int, width: int) -> "curses.window":
     x = max(0, (w - width) // 2)
     win = curses.newwin(height, width, y, x)
     win.box()
+    win.keypad(True)
     return win
 
 

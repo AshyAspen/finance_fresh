@@ -405,6 +405,9 @@ def test_text_prompt_curses(monkeypatch):
             def getstr(self, y, x, n):
                 return responses.pop(0)
 
+            def keypad(self, flag):
+                pass
+
         return FakeWin()
 
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
@@ -443,6 +446,9 @@ def test_confirm_prompt_curses(monkeypatch):
 
             def getch(self):
                 return keys.pop(0)
+
+            def keypad(self, flag):
+                pass
 
         return FakeWin()
 
@@ -534,6 +540,57 @@ def test_scroll_menu_quits_on_q(monkeypatch):
 
     index = cli.scroll_menu(["A", "B"], 0)
     assert index is None
+
+
+def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
+    """Ensure boxed scroll menus handle arrow navigation via keypad."""
+
+    captured = {}
+
+    def fake_wrapper(func):
+        class FakeStdScr:
+            def getmaxyx(self):
+                return (24, 80)
+
+            def keypad(self, flag):
+                pass
+
+        return func(FakeStdScr())
+
+    class FakeWin:
+        def __init__(self):
+            self.keypad_enabled = False
+            self.keys = [27, 91, 66, 10]  # ESC sequence for KEY_DOWN then Enter
+
+        def box(self):
+            pass
+
+        def addnstr(self, *args, **kwargs):
+            pass
+
+        def refresh(self):
+            pass
+
+        def keypad(self, flag):
+            self.keypad_enabled = flag
+            if flag:
+                self.keys = [cli.curses.KEY_DOWN, 10]
+
+        def getch(self):
+            return self.keys.pop(0)
+
+    def fake_newwin(h, w, y, x):
+        win = FakeWin()
+        captured["win"] = win
+        return win
+
+    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
+
+    index = cli.scroll_menu(["A", "B"], 0, boxed=True)
+    assert index == 1
+    assert captured["win"].keypad_enabled is True
 
 
 def test_select_returns_none_on_quit(monkeypatch):
