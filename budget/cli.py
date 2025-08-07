@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from bisect import bisect_left, bisect_right
 
 from .database import SessionLocal, init_db
-from .models import Transaction, Balance, Recurring
+from .models import Transaction, Balance, Recurring, Goal
 
 FREQUENCIES = [
     "weekly",
@@ -197,6 +197,90 @@ def add_recurring(is_income: bool, existing: Recurring | None = None) -> None:
     session.commit()
     session.close()
     print("Recurring item recorded.\n")
+
+
+def goal_form(
+    description: str,
+    target_date: datetime,
+    amount: float,
+    enabled: bool,
+):
+    """Interactive form for editing goal fields."""
+
+    while True:
+        choice = select(
+            "Select field to edit",
+            choices=[
+                (f"Name: {description}", "description"),
+                (f"Date: {target_date.strftime('%Y-%m-%d')}", "date"),
+                (f"Amount: {amount}", "amount"),
+                (f"Enabled: {'on' if enabled else 'off'}", "enabled"),
+                ("Save", "save"),
+                ("Cancel", "cancel"),
+            ],
+        )
+
+        if choice == "description":
+            new_desc = text("Description", default=description)
+            if new_desc is not None:
+                description = new_desc
+        elif choice == "date":
+            date_str = text(
+                "Date (YYYY-MM-DD)", default=target_date.strftime("%Y-%m-%d")
+            )
+            if date_str is not None:
+                try:
+                    target_date = datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    print("Invalid date format. Use YYYY-MM-DD.")
+        elif choice == "amount":
+            amount_str = text("Amount", default=str(amount))
+            if amount_str is not None:
+                try:
+                    amount = float(amount_str)
+                except ValueError:
+                    print("Invalid amount.")
+        elif choice == "enabled":
+            enabled = not enabled
+        elif choice == "save":
+            return description, target_date, amount, enabled
+        else:
+            return None
+
+
+def add_goal(existing: Goal | None = None) -> None:
+    """Prompt user to add or edit a goal."""
+
+    form = goal_form(
+        existing.description if existing else "",
+        existing.target_date if existing else datetime.utcnow(),
+        existing.amount if existing else 0.0,
+        existing.enabled if existing else True,
+    )
+    if form is None:
+        return
+    description, target_date, amount, enabled = form
+    session = SessionLocal()
+    if existing is None:
+        goal = Goal(
+            description=description,
+            amount=amount,
+            target_date=target_date,
+            enabled=enabled,
+        )
+        session.add(goal)
+    else:
+        goal = session.get(Goal, existing.id)
+        if goal is None:
+            session.close()
+            return
+        goal.description = description
+        goal.target_date = target_date
+        goal.amount = amount
+        goal.enabled = enabled
+    session.commit()
+    session.close()
+    print("Goal recorded.\n")
 
 
 def edit_recurring(is_income: bool) -> None:
@@ -751,52 +835,120 @@ def ledger_view() -> None:
     ledger_curses(initial_row, get_prev, get_next, bal_amt)
 
 
-def _info_screen(message: str) -> None:
-    """Display a simple message screen inside curses."""
-    with SessionLocal() as s:
-        bal = s.get(Balance, 1)
-        bal_amt = bal.amount if bal else 0.0
-    scroll_menu(["Back"], 0, header=message, footer_right=f"{bal_amt:.2f}")
+def goals_curses(entries, index, header=None, footer_right=""):
+    """Display goals list with controls for add, delete, edit, and toggle."""
 
+    def _menu(stdscr):
+        nonlocal index
+        curses.curs_set(0)
+        stdscr.keypad(True)
 
-def edit_wants_goals() -> None:
-    """Placeholder for editing wants/goals."""
+        while True:
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            offset = 1 if header else 0
+            visible = min(len(entries), h - 1 - offset)
+            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
 
-    _info_screen("Edit wants/goals (not implemented)")
+            stdscr.erase()
+            if header:
+                head_x = max(0, (w - len(header)) // 2)
+                try:
+                    stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                except curses.error:
+                    pass
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(entries):
+                    break
+                line = entries[line_idx]
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
 
+            footer_l = date.today().isoformat()
+            try:
+                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                stdscr.addnstr(
+                    h - 1,
+                    max(0, w - len(footer_right)),
+                    footer_right,
+                    len(footer_right),
+                )
+            except curses.error:
+                pass
+            stdscr.refresh()
 
-def toggle_wants_goals() -> None:
-    """Placeholder for toggling wants/goals."""
+            key = stdscr.getch()
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                index += 1
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return "edit", index
+            elif key == ord("a"):
+                return "add", None
+            elif key == ord("d") and entries:
+                return "delete", index
+            elif key == ord("t") and entries:
+                return "toggle", index
+            elif key == ord("q"):
+                return "quit", None
 
-    _info_screen("Toggle wants/goals (not implemented)")
+            if index < top:
+                top = index
+            elif index >= top + visible:
+                top = index - visible + 1
 
-
-def add_wants_goals() -> None:
-    """Placeholder for adding wants/goals."""
-
-    _info_screen("Add wants/goals (not implemented)")
+    return curses.wrapper(_menu)
 
 
 def wants_goals_menu() -> None:
-    """Secondary menu for wants/goals related actions."""
+    """Display and manage user goals."""
+
+    session = SessionLocal()
+    index = 0
     while True:
-        choice = select(
-            "Wants/Goals options",
-            choices=[
-                "Edit wants/goals",
-                "Toggle wants/goals",
-                "Add wants/goals",
-                "Back",
-            ],
+        goals = session.query(Goal).order_by(Goal.target_date).all()
+        amt_w = max((len(f"{g.amount:.2f}") for g in goals), default=0)
+        entries = [
+            f"{g.target_date.strftime('%Y-%m-%d')} | {g.amount:>{amt_w}.2f} | {'on' if g.enabled else 'off'} | {g.description}"
+            for g in goals
+        ]
+        bal = session.get(Balance, 1)
+        bal_amt = bal.amount if bal else 0.0
+        action, idx = goals_curses(
+            entries,
+            index,
+            header="Goals (Enter=edit, a=add, d=del, t=toggle)",
+            footer_right=f"{bal_amt:.2f}",
         )
-        if choice == "Edit wants/goals":
-            edit_wants_goals()
-        elif choice == "Toggle wants/goals":
-            toggle_wants_goals()
-        elif choice == "Add wants/goals":
-            add_wants_goals()
-        else:
+        if action == "add":
+            session.close()
+            add_goal()
+            session = SessionLocal()
+            index = len(goals)
+        elif action == "edit" and goals:
+            g = goals[idx]
+            session.close()
+            add_goal(g)
+            session = SessionLocal()
+            index = idx
+        elif action == "delete" and goals:
+            session.delete(goals[idx])
+            session.commit()
+            index = max(0, min(idx, len(goals) - 2))
+        elif action == "toggle" and goals:
+            goal = goals[idx]
+            goal.enabled = not goal.enabled
+            session.commit()
+            index = idx
+        else:  # quit
             break
+    session.close()
 
 
 def main() -> None:

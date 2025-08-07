@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
 
 from .database import Base
 
@@ -35,3 +35,15 @@ class Recurring(Base):
     amount = Column(Float, nullable=False)
     start_date = Column(DateTime, nullable=False)
     frequency = Column(String, nullable=False)
+
+
+class Goal(Base):
+    """A savings goal or want entry."""
+
+    __tablename__ = "goals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    description = Column(String, nullable=False)
+    amount = Column(Float, nullable=False)
+    target_date = Column(DateTime, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
