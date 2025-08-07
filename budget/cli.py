@@ -463,6 +463,71 @@ def prev_event(before: date, txns, recs):
     return prev_rec_date, prev_rec.description, prev_rec.amount
 
 
+def next_day(after: date, txns, recs):
+    """Return the next date after ``after`` that has any events."""
+    txn_dates = [t.timestamp.date() for t in txns]
+    idx = bisect_right(txn_dates, after)
+    next_txn_date = txn_dates[idx] if idx < len(txn_dates) else None
+    next_rec_date = None
+    for r in recs:
+        occ = occurrence_after(r.start_date.date(), r.frequency, after)
+        if occ is None:
+            continue
+        if next_rec_date is None or occ < next_rec_date:
+            next_rec_date = occ
+    if next_txn_date is None and next_rec_date is None:
+        return None
+    if next_txn_date is not None and (next_rec_date is None or next_txn_date <= next_rec_date):
+        date_ = next_txn_date
+    else:
+        date_ = next_rec_date
+
+    events = []
+    if next_txn_date is not None and next_txn_date == date_:
+        j = idx
+        while j < len(txns) and txns[j].timestamp.date() == date_:
+            events.append((txns[j].description, txns[j].amount))
+            j += 1
+    for r in recs:
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, date_)
+        if occ == date_:
+            events.append((r.description, r.amount))
+    return date_, events
+
+
+def prev_day(before: date, txns, recs):
+    """Return the most recent date before ``before`` with any events."""
+    txn_dates = [t.timestamp.date() for t in txns]
+    idx = bisect_left(txn_dates, before) - 1
+    prev_txn_date = txn_dates[idx] if idx >= 0 else None
+    prev_rec_date = None
+    for r in recs:
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, before - timedelta(days=1))
+        if occ is None:
+            continue
+        if prev_rec_date is None or occ > prev_rec_date:
+            prev_rec_date = occ
+    if prev_txn_date is None and prev_rec_date is None:
+        return None
+    if prev_txn_date is not None and (prev_rec_date is None or prev_txn_date >= prev_rec_date):
+        date_ = prev_txn_date
+    else:
+        date_ = prev_rec_date
+
+    events = []
+    if prev_txn_date is not None and prev_txn_date == date_:
+        j = idx
+        while j >= 0 and txns[j].timestamp.date() == date_:
+            j -= 1
+        for t in txns[j + 1 : idx + 1]:
+            events.append((t.description, t.amount))
+    for r in recs:
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, date_)
+        if occ == date_:
+            events.append((r.description, r.amount))
+    return date_, events
+
+
 @dataclass
 class LedgerRow:
     date: date
@@ -492,6 +557,17 @@ def ledger_rows(session):
     next_txn = next(txn_iter, None)
     occurrences = [(r.start_date.date(), r) for r in recs]
     running = 0.0
+    current_date = None
+    day_events: list[tuple[str, float]] = []
+
+    def emit_day(date_: date, events):
+        nonlocal running
+        if not events:
+            return
+        day_total = sum(amt for _, amt in events)
+        running += day_total
+        for desc, amt in events:
+            yield LedgerRow(date_, desc, amt, running + offset)
 
     while True:
         next_date = None
@@ -505,28 +581,36 @@ def ledger_rows(session):
                 next_kind = ("rec", idx)
         if next_kind is None:
             break
+        if current_date is None:
+            current_date = next_date
+        if next_date != current_date:
+            yield from emit_day(current_date, day_events)
+            day_events = []
+            current_date = next_date
+
         if next_kind[0] == "txn":
-            running += next_txn.amount
-            yield LedgerRow(next_date, next_txn.description, next_txn.amount, running + offset)
+            day_events.append((next_txn.description, next_txn.amount))
             next_txn = next(txn_iter, None)
         else:
             idx = next_kind[1]
             occ_date, rec = occurrences[idx]
-            running += rec.amount
-            yield LedgerRow(occ_date, rec.description, rec.amount, running + offset)
+            day_events.append((rec.description, rec.amount))
             occurrences[idx] = (advance_date(occ_date, rec.frequency), rec)
 
+    if current_date is not None:
+        yield from emit_day(current_date, day_events)
 
-def ledger_curses(initial_row, get_prev, get_next, bal_amt):
+
+def ledger_curses(initial_rows, get_prev, get_next, bal_amt):
     def _view(stdscr):
-        rows = [initial_row]
+        rows = list(initial_rows)
         index = 0
         curses.curs_set(0)
         stdscr.keypad(True)
 
-        desc_w = len(initial_row.description)
-        amt_w = len(f"{initial_row.amount:.2f}")
-        run_w = len(f"{initial_row.running:.2f}")
+        desc_w = max(len(r.description) for r in rows)
+        amt_w = max(len(f"{r.amount:.2f}") for r in rows)
+        run_w = max(len(f"{r.running:.2f}") for r in rows)
         footer_left = date.today().isoformat()
         footer_right = f"{bal_amt:.2f}"
 
@@ -540,26 +624,30 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 prev = get_prev(rows[0].date)
                 if prev is None:
                     break
-                prev_row = LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                )
-                rows.insert(0, prev_row)
-                desc_w = max(desc_w, len(prev_row.description))
-                amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-                run_w = max(run_w, len(f"{prev_row.running:.2f}"))
-                index += 1
+                prev_date, events = prev
+                day_total = sum(amt for _, amt in events)
+                prev_running = rows[0].running - day_total
+                for desc, amt in reversed(events):
+                    prev_row = LedgerRow(prev_date, desc, amt, prev_running)
+                    rows.insert(0, prev_row)
+                    desc_w = max(desc_w, len(desc))
+                    amt_w = max(amt_w, len(f"{amt:.2f}"))
+                    run_w = max(run_w, len(f"{prev_running:.2f}"))
+                index += len(events)
 
             while len(rows) < visible:
                 nxt = get_next(rows[-1].date)
                 if nxt is None:
                     break
-                next_row = LedgerRow(
-                    nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                )
-                rows.append(next_row)
-                desc_w = max(desc_w, len(next_row.description))
-                amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-                run_w = max(run_w, len(f"{next_row.running:.2f}"))
+                next_date, events = nxt
+                day_total = sum(amt for _, amt in events)
+                next_running = rows[-1].running + day_total
+                for desc, amt in events:
+                    next_row = LedgerRow(next_date, desc, amt, next_running)
+                    rows.append(next_row)
+                    desc_w = max(desc_w, len(desc))
+                    amt_w = max(amt_w, len(f"{amt:.2f}"))
+                    run_w = max(run_w, len(f"{next_running:.2f}"))
 
             top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
 
@@ -569,8 +657,14 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 if line_idx >= len(rows):
                     break
                 r = rows[line_idx]
+                show_date = (
+                    line_idx == top
+                    or line_idx == 0
+                    or r.date != rows[line_idx - 1].date
+                )
+                date_str = r.date.strftime("%Y-%m-%d") if show_date else "".ljust(10)
                 line = (
-                    f"{r.date.strftime('%Y-%m-%d')} | "
+                    f"{date_str} | "
                     f"{r.description:<{desc_w}} | "
                     f"{r.amount:>{amt_w}.2f} | {r.running:>{run_w}.2f}"
                 )
@@ -599,26 +693,31 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 else:
                     prev = get_prev(rows[0].date)
                     if prev is not None:
-                        prev_row = LedgerRow(
-                            prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                        )
-                        rows.insert(0, prev_row)
-                        desc_w = max(desc_w, len(prev_row.description))
-                        amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-                        run_w = max(run_w, len(f"{prev_row.running:.2f}"))
+                        prev_date, events = prev
+                        day_total = sum(amt for _, amt in events)
+                        prev_running = rows[0].running - day_total
+                        for desc, amt in reversed(events):
+                            prev_row = LedgerRow(prev_date, desc, amt, prev_running)
+                            rows.insert(0, prev_row)
+                            desc_w = max(desc_w, len(desc))
+                            amt_w = max(amt_w, len(f"{amt:.2f}"))
+                            run_w = max(run_w, len(f"{prev_running:.2f}"))
+                        index += len(events) - 1
             elif key == curses.KEY_DOWN:
                 if index < len(rows) - 1:
                     index += 1
                 else:
                     nxt = get_next(rows[-1].date)
                     if nxt is not None:
-                        next_row = LedgerRow(
-                            nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                        )
-                        rows.append(next_row)
-                        desc_w = max(desc_w, len(next_row.description))
-                        amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-                        run_w = max(run_w, len(f"{next_row.running:.2f}"))
+                        next_date, events = nxt
+                        day_total = sum(amt for _, amt in events)
+                        next_running = rows[-1].running + day_total
+                        for desc, amt in events:
+                            next_row = LedgerRow(next_date, desc, amt, next_running)
+                            rows.append(next_row)
+                            desc_w = max(desc_w, len(desc))
+                            amt_w = max(amt_w, len(f"{amt:.2f}"))
+                            run_w = max(run_w, len(f"{next_running:.2f}"))
                         index += 1
             elif key == ord("q"):
                 break
@@ -719,14 +818,14 @@ def ledger_view() -> None:
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
     today = date.today()
-    start_ev = prev_event(today + timedelta(days=1), txns, recs)
-    if start_ev is None:
-        start_ev = next_event(today - timedelta(days=1), txns, recs)
-    if start_ev is None:
+    start_day = prev_day(today + timedelta(days=1), txns, recs)
+    if start_day is None:
+        start_day = next_day(today - timedelta(days=1), txns, recs)
+    if start_day is None:
         print("No transactions recorded yet.\n")
         session.close()
         return
-    start_date, start_desc, start_amt = start_ev
+    start_date, start_events = start_day
 
     def total_up_to(d: date) -> float:
         total = 0.0
@@ -739,16 +838,16 @@ def ledger_view() -> None:
 
     offset = bal_amt - total_up_to(bal_date)
     start_running = total_up_to(start_date) + offset
-    initial_row = LedgerRow(start_date, start_desc, start_amt, start_running)
+    initial_rows = [LedgerRow(start_date, desc, amt, start_running) for desc, amt in start_events]
 
     def get_next(date_after):
-        return next_event(date_after, txns, recs)
+        return next_day(date_after, txns, recs)
 
     def get_prev(date_before):
-        return prev_event(date_before, txns, recs)
+        return prev_day(date_before, txns, recs)
 
     session.close()
-    ledger_curses(initial_row, get_prev, get_next, bal_amt)
+    ledger_curses(initial_rows, get_prev, get_next, bal_amt)
 
 
 def _info_screen(message: str) -> None:

@@ -203,6 +203,27 @@ def test_monthly_recurring_occurs_each_month():
         path.unlink()
 
 
+def test_ledger_multiple_events_same_day():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=100.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="A", amount=-10.0, timestamp=datetime(2023, 1, 2, 8)),
+                Transaction(description="B", amount=-5.0, timestamp=datetime(2023, 1, 2, 9)),
+            ]
+        )
+        session.commit()
+        rows = list(cli.ledger_rows(session))
+        assert len(rows) == 2
+        assert rows[0].date == rows[1].date == datetime(2023, 1, 2).date()
+        assert rows[0].running == rows[1].running == 85.0
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_list_transactions_columns(monkeypatch):
     Session, path = get_temp_session()
     try:
