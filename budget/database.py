@@ -18,7 +18,7 @@ Base = declarative_base()
 def init_db() -> None:
     """Create database tables if they do not exist."""
     insp = inspect(engine)
-    required = {"transactions", "balance", "recurring"}
+    required = {"transactions", "balance", "recurring", "goals"}
     existing = set(insp.get_table_names())
     if not required.issubset(existing):
         Base.metadata.create_all(engine)
