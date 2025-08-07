@@ -419,102 +419,112 @@ def count_occurrences(start: date, freq: str, target: date) -> int:
     return 1
 
 
-def next_event(after: date, txns, recs):
+def next_event(after: datetime, txns, recs):
     next_txn = None
-    txn_dates = [t.timestamp.date() for t in txns]
-    idx = bisect_right(txn_dates, after)
+    txn_times = [t.timestamp for t in txns]
+    idx = bisect_right(txn_times, after)
     if idx < len(txns):
         next_txn = txns[idx]
     next_rec = None
-    next_rec_date = None
+    next_rec_time = None
     for r in recs:
-        occ = occurrence_after(r.start_date.date(), r.frequency, after)
+        occ = occurrence_after(r.start_date.date(), r.frequency, after.date())
         if occ is None:
             continue
-        if next_rec_date is None or occ < next_rec_date:
-            next_rec_date = occ
+        occ_dt = datetime.combine(occ, datetime.min.time())
+        if next_rec_time is None or occ_dt < next_rec_time:
+            next_rec_time = occ_dt
             next_rec = r
     if next_txn is None and next_rec is None:
         return None
-    if next_txn is not None and (next_rec_date is None or next_txn.timestamp.date() <= next_rec_date):
-        return next_txn.timestamp.date(), next_txn.description, next_txn.amount
-    return next_rec_date, next_rec.description, next_rec.amount
+    if next_txn is not None and (next_rec_time is None or next_txn.timestamp <= next_rec_time):
+        return next_txn.timestamp, next_txn.description, next_txn.amount
+    return next_rec_time, next_rec.description, next_rec.amount
 
 
-def prev_event(before: date, txns, recs):
+def prev_event(before: datetime, txns, recs):
     prev_txn = None
-    txn_dates = [t.timestamp.date() for t in txns]
-    idx = bisect_left(txn_dates, before) - 1
+    txn_times = [t.timestamp for t in txns]
+    idx = bisect_left(txn_times, before) - 1
     if idx >= 0:
         prev_txn = txns[idx]
     prev_rec = None
-    prev_rec_date = None
+    prev_rec_time = None
     for r in recs:
-        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, before - timedelta(days=1))
+        target = before.date()
+        if before.time() == datetime.min.time():
+            target -= timedelta(days=1)
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, target)
         if occ is None:
             continue
-        if prev_rec_date is None or occ > prev_rec_date:
-            prev_rec_date = occ
+        occ_dt = datetime.combine(occ, datetime.min.time())
+        if prev_rec_time is None or occ_dt > prev_rec_time:
+            prev_rec_time = occ_dt
             prev_rec = r
     if prev_txn is None and prev_rec is None:
         return None
-    if prev_txn is not None and (prev_rec_date is None or prev_txn.timestamp.date() >= prev_rec_date):
-        return prev_txn.timestamp.date(), prev_txn.description, prev_txn.amount
-    return prev_rec_date, prev_rec.description, prev_rec.amount
+    if prev_txn is not None and (prev_rec_time is None or prev_txn.timestamp >= prev_rec_time):
+        return prev_txn.timestamp, prev_txn.description, prev_txn.amount
+    return prev_rec_time, prev_rec.description, prev_rec.amount
 
 
 @dataclass
 class LedgerRow:
-    date: date
+    timestamp: datetime
     description: str
     amount: float
     running: float
+
+    @property
+    def date(self) -> date:
+        return self.timestamp.date()
 
 
 def ledger_rows(session):
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
-    bal_date = bal.timestamp.date() if bal and bal.timestamp else date.today()
+    bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
 
-    def total_up_to(d: date) -> float:
+    def total_up_to(ts: datetime) -> float:
         total = 0.0
         for t in txns:
-            if t.timestamp.date() <= d:
+            if t.timestamp <= ts:
                 total += t.amount
         for r in recs:
-            total += count_occurrences(r.start_date.date(), r.frequency, d) * r.amount
+            total += count_occurrences(r.start_date.date(), r.frequency, ts.date()) * r.amount
         return total
 
-    offset = bal_amt - total_up_to(bal_date)
+    offset = bal_amt - total_up_to(bal_ts)
     txn_iter = iter(txns)
     next_txn = next(txn_iter, None)
-    occurrences = [(r.start_date.date(), r) for r in recs]
+    occurrences = [(r.start_date, r) for r in recs]
     running = 0.0
 
     while True:
-        next_date = None
+        next_ts: datetime | None = None
         next_kind = None
         if next_txn is not None:
-            next_date = next_txn.timestamp.date()
+            next_ts = next_txn.timestamp
             next_kind = ("txn", next_txn)
-        for idx, (occ_date, rec) in enumerate(occurrences):
-            if next_date is None or occ_date <= next_date:
-                next_date = occ_date
+        for idx, (occ_dt, rec) in enumerate(occurrences):
+            if next_ts is None or occ_dt <= next_ts:
+                next_ts = occ_dt
                 next_kind = ("rec", idx)
         if next_kind is None:
             break
         if next_kind[0] == "txn":
             running += next_txn.amount
-            yield LedgerRow(next_date, next_txn.description, next_txn.amount, running + offset)
+            yield LedgerRow(next_txn.timestamp, next_txn.description, next_txn.amount, running + offset)
             next_txn = next(txn_iter, None)
         else:
             idx = next_kind[1]
-            occ_date, rec = occurrences[idx]
+            occ_dt, rec = occurrences[idx]
             running += rec.amount
-            yield LedgerRow(occ_date, rec.description, rec.amount, running + offset)
-            occurrences[idx] = (advance_date(occ_date, rec.frequency), rec)
+            yield LedgerRow(occ_dt, rec.description, rec.amount, running + offset)
+            next_occ = datetime.combine(advance_date(occ_dt.date(), rec.frequency), datetime.min.time())
+            occurrences[idx] = (next_occ, rec)
 
 
 def ledger_curses(initial_row, get_prev, get_next, bal_amt):
@@ -537,7 +547,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
             visible = h - 1
 
             while index < visible // 2:
-                prev = get_prev(rows[0].date)
+                prev = get_prev(rows[0].timestamp)
                 if prev is None:
                     break
                 prev_row = LedgerRow(
@@ -550,7 +560,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 index += 1
 
             while len(rows) < visible:
-                nxt = get_next(rows[-1].date)
+                nxt = get_next(rows[-1].timestamp)
                 if nxt is None:
                     break
                 next_row = LedgerRow(
@@ -597,7 +607,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 if index > 0:
                     index -= 1
                 else:
-                    prev = get_prev(rows[0].date)
+                    prev = get_prev(rows[0].timestamp)
                     if prev is not None:
                         prev_row = LedgerRow(
                             prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
@@ -610,7 +620,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 if index < len(rows) - 1:
                     index += 1
                 else:
-                    nxt = get_next(rows[-1].date)
+                    nxt = get_next(rows[-1].timestamp)
                     if nxt is not None:
                         next_row = LedgerRow(
                             nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
@@ -715,37 +725,37 @@ def ledger_view() -> None:
     session = SessionLocal()
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
-    bal_date = bal.timestamp.date() if bal and bal.timestamp else date.today()
+    bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
     today = date.today()
-    start_ev = prev_event(today + timedelta(days=1), txns, recs)
+    start_ev = prev_event(datetime.combine(today + timedelta(days=1), datetime.min.time()), txns, recs)
     if start_ev is None:
-        start_ev = next_event(today - timedelta(days=1), txns, recs)
+        start_ev = next_event(datetime.combine(today - timedelta(days=1), datetime.min.time()), txns, recs)
     if start_ev is None:
         print("No transactions recorded yet.\n")
         session.close()
         return
-    start_date, start_desc, start_amt = start_ev
+    start_ts, start_desc, start_amt = start_ev
 
-    def total_up_to(d: date) -> float:
+    def total_up_to(ts: datetime) -> float:
         total = 0.0
         for t in txns:
-            if t.timestamp.date() <= d:
+            if t.timestamp <= ts:
                 total += t.amount
         for r in recs:
-            total += count_occurrences(r.start_date.date(), r.frequency, d) * r.amount
+            total += count_occurrences(r.start_date.date(), r.frequency, ts.date()) * r.amount
         return total
 
-    offset = bal_amt - total_up_to(bal_date)
-    start_running = total_up_to(start_date) + offset
-    initial_row = LedgerRow(start_date, start_desc, start_amt, start_running)
+    offset = bal_amt - total_up_to(bal_ts)
+    start_running = total_up_to(start_ts) + offset
+    initial_row = LedgerRow(start_ts, start_desc, start_amt, start_running)
 
-    def get_next(date_after):
-        return next_event(date_after, txns, recs)
+    def get_next(ts_after):
+        return next_event(ts_after, txns, recs)
 
-    def get_prev(date_before):
-        return prev_event(date_before, txns, recs)
+    def get_prev(ts_before):
+        return prev_event(ts_before, txns, recs)
 
     session.close()
     ledger_curses(initial_row, get_prev, get_next, bal_amt)
