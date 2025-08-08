@@ -552,7 +552,13 @@ def occurrence_after(start: date, freq: str, after: date) -> date | None:
     step = step_map.get(freq)
     if step:
         months = months_between(start, after)
-        months = ((months // step) + 1) * step
+        # round down to the nearest step interval
+        months = (months // step) * step
+        occ = add_months(start, months)
+        # if the computed occurrence is not strictly after the target date,
+        # advance by one additional interval
+        if occ <= after:
+            months += step
         return add_months(start, months)
     return None
 
