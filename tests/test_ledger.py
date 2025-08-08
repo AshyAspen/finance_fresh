@@ -109,6 +109,68 @@ def test_multiple_events_same_day():
         path.unlink()
 
 
+def test_multiple_recurring_same_day():
+    """Multiple recurring incomes/bills on the same day propagate correctly."""
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2022, 12, 31)),
+                Recurring(
+                    description="Salary",
+                    amount=1000.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+                Recurring(
+                    description="Rent",
+                    amount=-500.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 4))
+        assert rows[0].date == rows[1].date == date(2023, 1, 1)
+        assert {rows[0].description, rows[1].description} == {"Salary", "Rent"}
+        assert rows[2].date == rows[3].date == date(2023, 2, 1)
+        assert {rows[2].description, rows[3].description} == {"Salary", "Rent"}
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_last_day_of_month_propagates_and_recovers():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 31),
+                    frequency="monthly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 5))
+        assert [r.date for r in rows] == [
+            date(2023, 1, 31),
+            date(2023, 2, 28),
+            date(2023, 3, 31),
+            date(2023, 4, 30),
+            date(2023, 5, 31),
+        ]
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_ledger_view_displays_all_events(monkeypatch):
     Session, path = get_temp_session()
     try:

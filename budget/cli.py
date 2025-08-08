@@ -461,7 +461,11 @@ def add_months(d: date, months: int) -> date:
     month = d.month - 1 + months
     year = d.year + month // 12
     month = month % 12 + 1
-    day = min(d.day, calendar.monthrange(year, month)[1])
+    last_day = calendar.monthrange(year, month)[1]
+    if d.day == calendar.monthrange(d.year, d.month)[1]:
+        day = last_day
+    else:
+        day = min(d.day, last_day)
     return date(year, month, day)
 
 
