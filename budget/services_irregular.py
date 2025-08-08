@@ -382,6 +382,53 @@ def forecast_irregular(
     else:  # pragma: no cover - defensive
         raise NotImplementedError(f"Unknown mode: {mode}")
 
+
+def irregular_daily_series(
+    session: Session,
+    start: date,
+    end: date,
+    mode: str = "deterministic",
+    quantile: str = "p80",
+) -> list[tuple[date, float]]:
+    """Aggregate forecasts for all active irregular categories.
+
+    Parameters
+    ----------
+    session : Session
+        Database session.
+    start, end : date
+        Inclusive date range for the forecast.
+    mode : str, optional
+        Forecasting mode passed to :func:`forecast_irregular`. Defaults to
+        ``"deterministic"``.
+    quantile : str, optional
+        When ``mode`` is ``"monte_carlo"``, the percentile series to use.
+
+    Returns
+    -------
+    list[tuple[date, float]]
+        Sorted daily totals of forecasted amounts.
+    """
+
+    cats = (
+        session.query(IrregularCategory)
+        .filter(IrregularCategory.active.is_(True))
+        .all()
+    )
+    totals: dict[date, float] = {}
+    for cat in cats:
+        forecast = forecast_irregular(session, cat.id, start, end, mode=mode)
+        series: Iterable[tuple[date, float]]
+        if mode == "monte_carlo":
+            series = forecast.get(quantile, [])  # type: ignore[assignment]
+        else:
+            series = forecast  # type: ignore[assignment]
+        for d, amt in series:
+            if amt:
+                totals[d] = totals.get(d, 0.0) + amt
+    return sorted(totals.items(), key=lambda x: x[0])
+
+
 def categories(session: Session) -> list[IrregularCategory]: ...
 
 

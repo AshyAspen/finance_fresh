@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 from .database import SessionLocal, init_db
 from .models import Transaction, Balance, Recurring, Goal
+from .services_irregular import irregular_daily_series
 
 FREQUENCIES = [
     "weekly",
@@ -21,6 +22,10 @@ FREQUENCIES = [
     "semi annually",
     "annually",
 ]
+
+# irregular forecast mode stored for session
+IRREG_MODE = "monte_carlo"
+IRREG_QUANTILE = "p80"
 
 
 def select(stdscr, message, choices, default=None, boxed=True):
@@ -533,6 +538,35 @@ def set_balance(stdscr) -> None:
     session.close()
 
 
+def settings_help_menu(stdscr) -> None:
+    """Allow adjusting simple runtime settings."""
+
+    global IRREG_MODE, IRREG_QUANTILE
+    while True:
+        mode_label = (
+            "Deterministic"
+            if IRREG_MODE == "deterministic"
+            else ("Monte Carlo P50" if IRREG_QUANTILE == "p50" else "Monte Carlo P80")
+        )
+        choice = select(
+            stdscr,
+            "Settings / Help",
+            [(f"Irregular forecast: {mode_label}", "toggle"), "Back"],
+            boxed=False,
+        )
+        if choice == "toggle":
+            if IRREG_MODE == "deterministic":
+                IRREG_MODE = "monte_carlo"
+                IRREG_QUANTILE = "p50"
+            elif IRREG_QUANTILE == "p50":
+                IRREG_QUANTILE = "p80"
+            else:
+                IRREG_MODE = "deterministic"
+                IRREG_QUANTILE = "p80"
+        else:
+            break
+
+
 def add_months(d: date, months: int) -> date:
     month = d.month - 1 + months
     year = d.year + month // 12
@@ -737,6 +771,24 @@ def ledger_rows(session):
     bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
+
+    start_date = max(date.today(), bal_ts.date())
+    irr_series = irregular_daily_series(
+        session,
+        start_date,
+        start_date + timedelta(days=365),
+        mode=IRREG_MODE,
+        quantile=IRREG_QUANTILE,
+    )
+    for d, amt in irr_series:
+        txns.append(
+            Transaction(
+                description="Irregular",
+                amount=-amt,
+                timestamp=datetime.combine(d, datetime.min.time()),
+            )
+        )
+    txns.sort(key=lambda t: t.timestamp)
 
     def total_up_to(ts: datetime) -> float:
         total = 0.0
@@ -1045,6 +1097,25 @@ def ledger_view(stdscr) -> None:
     bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
     recs = session.query(Recurring).all()
+
+    start_date = max(date.today(), bal_ts.date())
+    irr_series = irregular_daily_series(
+        session,
+        start_date,
+        start_date + timedelta(days=365),
+        mode=IRREG_MODE,
+        quantile=IRREG_QUANTILE,
+    )
+    for d, amt in irr_series:
+        txns.append(
+            Transaction(
+                description="Irregular",
+                amount=-amt,
+                timestamp=datetime.combine(d, datetime.min.time()),
+            )
+        )
+    txns.sort(key=lambda t: t.timestamp)
+
     today = date.today()
     start_ev = prev_event(datetime.combine(today + timedelta(days=1), datetime.min.time()), txns, recs)
     if start_ev is None:
@@ -1216,6 +1287,7 @@ def main(stdscr) -> None:
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
+                    "Settings/Help",
                     "Quit",
                 ],
                 boxed=False,
@@ -1232,6 +1304,8 @@ def main(stdscr) -> None:
                 set_balance(stdscr)
             elif choice == "Wants/Goals":
                 wants_goals_menu(stdscr)
+            elif choice == "Settings/Help":
+                settings_help_menu(stdscr)
             else:
                 break
 
