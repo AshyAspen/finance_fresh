@@ -276,6 +276,28 @@ def test_next_event_handles_multiple_recurring():
         path.unlink()
 
 
+def test_next_event_monthly_mid_month():
+    """Monthly recurring events occurring mid-month are not skipped."""
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add(
+            Recurring(
+                description="HP Instant Ink",
+                amount=-10.0,
+                start_date=datetime(2025, 7, 8),
+                frequency="monthly",
+            )
+        )
+        session.commit()
+        recs = session.query(Recurring).all()
+        ev = cli.next_event(datetime(2025, 9, 1), [], recs)
+        assert ev[0].date() == date(2025, 9, 8)
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_ledger_view_handles_multiple_recurring(monkeypatch):
     Session, path = get_temp_session()
     try:
