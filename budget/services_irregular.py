@@ -415,7 +415,10 @@ def irregular_daily_series(
         .filter(IrregularCategory.active.is_(True))
         .all()
     )
-    totals: dict[date, float] = {}
+    horizon = (end - start).days + 1
+    totals: dict[date, float] = {
+        start + timedelta(days=i): 0.0 for i in range(horizon)
+    }
     for cat in cats:
         forecast = forecast_irregular(session, cat.id, start, end, mode=mode)
         series: Iterable[tuple[date, float]]
@@ -424,8 +427,8 @@ def irregular_daily_series(
         else:
             series = forecast  # type: ignore[assignment]
         for d, amt in series:
-            if amt:
-                totals[d] = totals.get(d, 0.0) + amt
+            if start <= d <= end and amt:
+                totals[d] += amt
     return sorted(totals.items(), key=lambda x: x[0])
 
 
