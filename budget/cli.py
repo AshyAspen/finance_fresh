@@ -409,9 +409,10 @@ def edit_recurring(stdscr, is_income: bool) -> None:
             .all()
         )
         desc_w = max((len(r.description) for r in recs), default=0)
+        freq_w = max((len(r.frequency) for r in recs), default=0)
         amt_w = max((len(f"{r.amount:.2f}") for r in recs), default=0)
         entries = [
-            f"{r.start_date.strftime('%Y-%m-%d')} | {r.description:<{desc_w}} | {r.amount:>{amt_w}.2f}"
+            f"{r.start_date.strftime('%Y-%m-%d')} | {r.description:<{desc_w}} | {r.frequency:<{freq_w}} | {r.amount:>{amt_w}.2f}"
             for r in recs
         ]
         entries.append("Back")
