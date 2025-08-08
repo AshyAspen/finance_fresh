@@ -19,7 +19,15 @@ def init_db() -> None:
     """Create database tables if they do not exist."""
     from . import models  # noqa: F401
     insp = inspect(engine)
-    required = {"accounts", "transactions", "balance", "recurring", "goals"}
+    required = {
+        "accounts",
+        "transactions",
+        "balance",
+        "recurring",
+        "goals",
+        "irregular_categories",
+        "irregular_state",
+    }
     existing = set(insp.get_table_names())
     if not required.issubset(existing):
         Base.metadata.create_all(engine)
@@ -73,3 +81,109 @@ def init_db() -> None:
                         f"CREATE INDEX IF NOT EXISTS ix_{table}_account_id_timestamp ON {table}(account_id, timestamp)"
                     )
                 )
+
+        # Ensure irregular category columns and indexes
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(irregular_categories)"))]
+        if "active" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_categories ADD COLUMN active BOOLEAN DEFAULT 1"
+                )
+            )
+        if "window_days" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_categories ADD COLUMN window_days INTEGER DEFAULT 120"
+                )
+            )
+        if "alpha" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_categories ADD COLUMN alpha FLOAT DEFAULT 0.3"
+                )
+            )
+        if "safety_quantile" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_categories ADD COLUMN safety_quantile FLOAT DEFAULT 0.8"
+                )
+            )
+        if "account_id" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_categories ADD COLUMN account_id INTEGER REFERENCES accounts(id)"
+                )
+            )
+        if "created_at" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_categories ADD COLUMN created_at DATETIME"
+                )
+            )
+        if "updated_at" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_categories ADD COLUMN updated_at DATETIME"
+                )
+            )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_irregular_categories_name ON irregular_categories(name)"
+            )
+        )
+
+        # Ensure irregular state columns and indexes
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(irregular_state)"))]
+        if "category_id" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN category_id INTEGER REFERENCES irregular_categories(id)"
+                )
+            )
+        if "avg_gap_days" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN avg_gap_days FLOAT"
+                )
+            )
+        if "weekday_probs" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN weekday_probs TEXT"
+                )
+            )
+        if "amount_mu" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN amount_mu FLOAT"
+                )
+            )
+        if "amount_sigma" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN amount_sigma FLOAT"
+                )
+            )
+        if "median_amount" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN median_amount FLOAT"
+                )
+            )
+        if "last_event_at" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN last_event_at DATETIME"
+                )
+            )
+        if "updated_at" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_state ADD COLUMN updated_at DATETIME"
+                )
+            )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_irregular_state_category_id ON irregular_state(category_id)"
+            )
+        )
