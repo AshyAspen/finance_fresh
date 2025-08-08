@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine, text
 
-from tests import helpers  # ensures project root on path
+from tests import helpers  # noqa: F401  # ensures project root on path
 from budget import database
 
 

@@ -1,6 +1,6 @@
-import pytest
+import pytest  # noqa: F401
 
-from tests import helpers  # ensures project root on sys.path
+from tests import helpers  # noqa: F401  # ensures project root on sys.path
 from budget import cli
 
 
