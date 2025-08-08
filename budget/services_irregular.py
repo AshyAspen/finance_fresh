@@ -429,7 +429,18 @@ def irregular_daily_series(
     return sorted(totals.items(), key=lambda x: x[0])
 
 
-def categories(session: Session) -> list[IrregularCategory]: ...
+def categories(session: Session) -> list[IrregularCategory]:
+    """Return irregular categories ordered by name.
+
+    All categories are returned so the caller can inspect or toggle the
+    ``active`` flag as needed.
+    """
+
+    return (
+        session.query(IrregularCategory)
+        .order_by(IrregularCategory.name)
+        .all()
+    )
 
 
 def rules_for(session: Session, category_id: int) -> list[str]:
