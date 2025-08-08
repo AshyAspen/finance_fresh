@@ -12,14 +12,14 @@ def test_add_goal(monkeypatch):
         monkeypatch.setattr(
             cli,
             "goal_form",
-            lambda desc, date, amount, enabled: (
+            lambda stdscr, desc, date, amount, enabled: (
                 "Save",
                 datetime(2023, 1, 1),
                 50.0,
                 True,
             ),
         )
-        cli.add_goal()
+        cli.add_goal(object())
         session = Session()
         goals = session.query(Goal).all()
         assert len(goals) == 1
@@ -36,7 +36,7 @@ def test_add_goal(monkeypatch):
 def test_goal_form_toggle(monkeypatch):
     monkeypatch.setattr(cli, "select", make_prompt(["enabled", "save"]))
     monkeypatch.setattr(cli, "text", make_prompt([]))
-    result = cli.goal_form("Desc", datetime(2023, 1, 1), 10.0, True)
+    result = cli.goal_form(object(), "Desc", datetime(2023, 1, 1), 10.0, True)
     assert result == ("Desc", datetime(2023, 1, 1), 10.0, False)
 
 
@@ -65,7 +65,7 @@ def test_wants_goals_menu_columns(monkeypatch):
 
         captured = {}
 
-        def fake_curses(entries, index, header=None, footer_right=""):
+        def fake_curses(stdscr, entries, index, header=None, footer_right=""):
             captured["entries"] = entries
             captured["index"] = index
             return ("quit", None)
@@ -73,7 +73,7 @@ def test_wants_goals_menu_columns(monkeypatch):
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(cli, "goals_curses", fake_curses)
 
-        cli.wants_goals_menu()
+        cli.wants_goals_menu(object())
 
         first = captured["entries"][0].split("|")
         assert first[0].strip() == "2023-01-01"

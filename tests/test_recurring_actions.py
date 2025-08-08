@@ -25,14 +25,14 @@ def test_delete_recurring(monkeypatch, is_income, amount):
 
         responses = [("delete", 0), None]
 
-        def fake_scroll(entries, index, **kwargs):
+        def fake_scroll(stdscr, entries, index, **kwargs):
             return responses.pop(0)
 
         monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
         monkeypatch.setattr(cli, "SessionLocal", Session)
-        monkeypatch.setattr(cli, "confirm", lambda msg: True)
+        monkeypatch.setattr(cli, "confirm", lambda stdscr, msg: True)
 
-        cli.edit_recurring(is_income)
+        cli.edit_recurring(object(), is_income)
 
         session = Session()
         assert session.query(Recurring).count() == 0
