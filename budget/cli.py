@@ -27,6 +27,7 @@ from .services_irregular import (
     update_irregular_state,
     get_or_create_state,
 )
+from .services import occurrences_between
 
 FREQUENCIES = [
     "weekly",
@@ -37,6 +38,10 @@ FREQUENCIES = [
     "semi annually",
     "annually",
 ]
+
+# planning horizon configuration
+PLAN_PAST_BUFFER_DAYS = 30
+PLAN_FUTURE_DAYS = 365
 
 # irregular forecast mode stored for session
 IRREG_MODE = "monte_carlo"
@@ -446,10 +451,16 @@ def edit_recurring(stdscr, is_income: bool) -> None:
         desc_w = max((len(r.description) for r in recs), default=0)
         freq_w = max((len(r.frequency) for r in recs), default=0)
         amt_w = max((len(f"{r.amount:.2f}") for r in recs), default=0)
-        entries = [
-            f"{r.start_date.strftime('%Y-%m-%d')} | {r.description:<{desc_w}} | {r.frequency:<{freq_w}} | {r.amount:>{amt_w}.2f}"
-            for r in recs
-        ]
+        entries = []
+        for r in recs:
+            anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+            next_occ = occurrences_between(
+                anchor, r.frequency, date.today(), date.today() + timedelta(days=365)
+            )
+            next_str = next_occ[0].strftime("%Y-%m-%d") if next_occ else "n/a"
+            entries.append(
+                f"{r.start_date.strftime('%Y-%m-%d')} | {r.description:<{desc_w}} | {r.frequency:<{freq_w}} | {r.amount:>{amt_w}.2f} | Next occurrence: {next_str}"
+            )
         entries.append("Back")
         bal = session.get(Balance, 1)
         bal_amt = bal.amount if bal else 0.0
@@ -799,14 +810,20 @@ def ledger_rows(session):
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
     bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
-    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
-    recs = session.query(Recurring).all()
 
-    start_date = max(date.today(), bal_ts.date())
+    # Define a fixed planning horizon
+    plan_start = min(date.today(), bal_ts.date()) - timedelta(days=PLAN_PAST_BUFFER_DAYS)
+    plan_end = date.today() + timedelta(days=PLAN_FUTURE_DAYS)
+
+    # real transactions
+    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
+
+    # irregular forecast within planning window
+    irr_start = max(date.today(), bal_ts.date())
     irr_series = irregular_daily_series(
         session,
-        start_date,
-        start_date + timedelta(days=365),
+        irr_start,
+        plan_end,
         mode=IRREG_MODE,
         quantile=IRREG_QUANTILE,
     )
@@ -819,46 +836,39 @@ def ledger_rows(session):
                     timestamp=datetime.combine(d, datetime.min.time()),
                 )
             )
+
+    # synthetic recurring transactions across horizon
+    recs = session.query(Recurring).all()
+    synthetic_txns: list[Transaction] = []
+    for idx, r in enumerate(recs):
+        anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+        occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
+        for occ in occs:
+            synthetic_txns.append(
+                Transaction(
+                    description=r.description,
+                    amount=r.amount,
+                    timestamp=datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=idx),
+                    account_id=r.account_id,
+                )
+            )
+
+    txns.extend(synthetic_txns)
     txns.sort(key=lambda t: t.timestamp)
 
-    def total_up_to(ts: datetime) -> float:
-        total = 0.0
-        for t in txns:
-            if t.timestamp <= ts:
-                total += t.amount
-        for r in recs:
-            total += count_occurrences(r.start_date.date(), r.frequency, ts.date()) * r.amount
-        return total
+    # compute offset so running balance matches stored balance at bal_ts
+    total_before = 0.0
+    for t in txns:
+        if t.timestamp <= bal_ts:
+            total_before += t.amount
+    offset = bal_amt - total_before
 
-    offset = bal_amt - total_up_to(bal_ts)
-    txn_iter = iter(txns)
-    next_txn = next(txn_iter, None)
-    occurrences = [(r.start_date, r) for r in recs]
     running = 0.0
-
-    while True:
-        next_ts: datetime | None = None
-        next_kind = None
-        if next_txn is not None:
-            next_ts = next_txn.timestamp
-            next_kind = ("txn", next_txn)
-        for idx, (occ_dt, rec) in enumerate(occurrences):
-            if next_ts is None or occ_dt <= next_ts:
-                next_ts = occ_dt
-                next_kind = ("rec", idx)
-        if next_kind is None:
-            break
-        if next_kind[0] == "txn":
-            running += next_txn.amount
-            yield LedgerRow(next_txn.timestamp, next_txn.description, next_txn.amount, running + offset)
-            next_txn = next(txn_iter, None)
-        else:
-            idx = next_kind[1]
-            occ_dt, rec = occurrences[idx]
-            running += rec.amount
-            yield LedgerRow(occ_dt, rec.description, rec.amount, running + offset)
-            next_occ = datetime.combine(advance_date(occ_dt.date(), rec.frequency), datetime.min.time())
-            occurrences[idx] = (next_occ, rec)
+    for t in txns:
+        if not (plan_start <= t.timestamp.date() <= plan_end):
+            continue
+        running += t.amount
+        yield LedgerRow(t.timestamp, t.description, t.amount, running + offset)
 
 
 def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
@@ -1126,62 +1136,35 @@ def scroll_menu(
 
 def ledger_view(stdscr) -> None:
     """Display a scrollable ledger as ``date | name | amount | balance``."""
-
     session = SessionLocal()
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
-    bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
-    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
-    recs = session.query(Recurring).all()
-
-    start_date = max(date.today(), bal_ts.date())
-    irr_series = irregular_daily_series(
-        session,
-        start_date,
-        start_date + timedelta(days=365),
-        mode=IRREG_MODE,
-        quantile=IRREG_QUANTILE,
-    )
-    for d, amt in irr_series:
-        if amt:
-            txns.append(
-                Transaction(
-                    description="Irregular",
-                    amount=-amt,
-                    timestamp=datetime.combine(d, datetime.min.time()),
-                )
-            )
-    txns.sort(key=lambda t: t.timestamp)
-
-    today = date.today()
-    start_ev = prev_event(datetime.combine(today + timedelta(days=1), datetime.min.time()), txns, recs)
-    if start_ev is None:
-        start_ev = next_event(datetime.combine(today - timedelta(days=1), datetime.min.time()), txns, recs)
-    if start_ev is None:
-        session.close()
+    rows = list(ledger_rows(session))
+    session.close()
+    if not rows:
         return
-    start_ts, start_desc, start_amt = start_ev
 
-    def total_up_to(ts: datetime) -> float:
-        total = 0.0
-        for t in txns:
-            if t.timestamp <= ts:
-                total += t.amount
-        for r in recs:
-            total += count_occurrences(r.start_date.date(), r.frequency, ts.date()) * r.amount
-        return total
-
-    offset = bal_amt - total_up_to(bal_ts)
-    start_running = total_up_to(start_ts) + offset
-    initial_row = LedgerRow(start_ts, start_desc, start_amt, start_running)
-
-    def get_next(ts_after):
-        return next_event(ts_after, txns, recs)
+    ts_list = [r.timestamp for r in rows]
+    today_dt = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
+    start_idx = bisect_right(ts_list, today_dt) - 1
+    if start_idx < 0:
+        start_idx = 0
+    initial_row = rows[start_idx]
 
     def get_prev(ts_before):
-        return prev_event(ts_before, txns, recs)
+        idx = bisect_left(ts_list, ts_before) - 1
+        if idx >= 0:
+            r = rows[idx]
+            return r.timestamp, r.description, r.amount
+        return None
 
-    session.close()
+    def get_next(ts_after):
+        idx = bisect_right(ts_list, ts_after)
+        if idx < len(rows):
+            r = rows[idx]
+            return r.timestamp, r.description, r.amount
+        return None
+
     ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt)
 
 
