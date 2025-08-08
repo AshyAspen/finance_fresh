@@ -50,23 +50,30 @@ def test_text_prompt_curses(monkeypatch):
         def keypad(self, flag):
             pass
 
+    class FakeWin:
+        instances = []
+
+        def __init__(self):
+            self.calls = []
+            FakeWin.instances.append(self)
+
+        def box(self):
+            pass
+
+        def addnstr(self, *args, **kwargs):
+            pass
+
+        def refresh(self):
+            self.calls.append("refresh")
+
+        def getstr(self, y, x, n):
+            self.calls.append("getstr")
+            return responses.pop(0)
+
+        def keypad(self, flag):
+            pass
+
     def fake_newwin(h, w, y, x):
-        class FakeWin:
-            def box(self):
-                pass
-
-            def addnstr(self, *args, **kwargs):
-                pass
-
-            def refresh(self):
-                pass
-
-            def getstr(self, y, x, n):
-                return responses.pop(0)
-
-            def keypad(self, flag):
-                pass
-
         return FakeWin()
 
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
@@ -76,7 +83,9 @@ def test_text_prompt_curses(monkeypatch):
 
     stdscr = FakeStdScr()
     assert cli.text(stdscr, "Prompt") == "hello"
+    assert FakeWin.instances[0].calls == ["refresh", "getstr"]
     assert cli.text(stdscr, "Prompt", default="dflt") == "dflt"
+    assert FakeWin.instances[1].calls == ["refresh", "getstr"]
 
 
 def test_confirm_prompt_curses(monkeypatch):
@@ -89,23 +98,30 @@ def test_confirm_prompt_curses(monkeypatch):
         def keypad(self, flag):
             pass
 
+    class FakeWin:
+        instances = []
+
+        def __init__(self):
+            self.calls = []
+            FakeWin.instances.append(self)
+
+        def box(self):
+            pass
+
+        def addnstr(self, *args, **kwargs):
+            pass
+
+        def refresh(self):
+            self.calls.append("refresh")
+
+        def getch(self):
+            self.calls.append("getch")
+            return keys.pop(0)
+
+        def keypad(self, flag):
+            pass
+
     def fake_newwin(h, w, y, x):
-        class FakeWin:
-            def box(self):
-                pass
-
-            def addnstr(self, *args, **kwargs):
-                pass
-
-            def refresh(self):
-                pass
-
-            def getch(self):
-                return keys.pop(0)
-
-            def keypad(self, flag):
-                pass
-
         return FakeWin()
 
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
@@ -113,7 +129,9 @@ def test_confirm_prompt_curses(monkeypatch):
 
     stdscr = FakeStdScr()
     assert cli.confirm(stdscr, "Sure?") is True
+    assert FakeWin.instances[0].calls == ["refresh", "getch"]
     assert cli.confirm(stdscr, "Sure?") is False
+    assert FakeWin.instances[1].calls == ["refresh", "getch"]
 
 
 def test_scroll_menu_handles_curses_error(monkeypatch):
@@ -194,8 +212,9 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
 
     class FakeWin:
         def __init__(self):
-            self.keypad_enabled = False
+            self.keypad_calls = []
             self.keys = [cli.curses.KEY_DOWN, 10]
+            self.calls = []
 
         def box(self):
             pass
@@ -204,13 +223,20 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
             pass
 
         def refresh(self):
-            pass
+            self.calls.append("refresh")
 
         def keypad(self, flag):
-            self.keypad_enabled = flag
+            self.keypad_calls.append(flag)
 
         def getch(self):
+            self.calls.append("getch")
             return self.keys.pop(0) if self.keys else 10
+
+        def erase(self):
+            pass
+
+        def noutrefresh(self):
+            pass
 
     fake_win = FakeWin()
 
@@ -223,7 +249,9 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
 
     index = cli.scroll_menu(FakeStdScr(), ["A", "B"], 0, boxed=True)
     assert index == 1
-    assert captured["win"].keypad_enabled is True
+    assert captured["win"].calls == ["refresh", "getch", "refresh", "getch"]
+    assert captured["win"].keypad_calls[0] is True
+    assert captured["win"].keypad_calls[-1] is False
 
 
 def test_select_returns_none_on_quit(monkeypatch):

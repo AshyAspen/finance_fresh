@@ -72,8 +72,43 @@ def _center_box(stdscr, height: int, width: int) -> "curses.window":
     x = max(0, (w - width) // 2)
     win = curses.newwin(height, width, y, x)
     win.box()
-    win.keypad(True)
     return win
+
+
+@contextmanager
+def temp_cursor(state: int):
+    """Temporarily set cursor visibility and restore on exit."""
+
+    prev = None
+    try:
+        prev = curses.curs_set(state)
+    except curses.error:  # pragma: no cover - some terminals
+        prev = None
+    try:
+        yield
+    finally:
+        if prev is not None:
+            try:
+                curses.curs_set(prev)
+            except curses.error:  # pragma: no cover - cleanup best effort
+                pass
+
+
+@contextmanager
+def keypad_mode(win):
+    """Enable keypad mode and ensure it is disabled afterwards."""
+
+    try:
+        win.keypad(True)
+    except curses.error:  # pragma: no cover - fake windows
+        pass
+    try:
+        yield
+    finally:
+        try:
+            win.keypad(False)
+        except curses.error:  # pragma: no cover - fake windows
+            pass
 
 
 @contextmanager
@@ -88,7 +123,8 @@ def modal_box(stdscr, height: int, width: int):
         panel.update_panels()
         curses.doupdate()
     try:
-        yield win
+        with keypad_mode(win):
+            yield win
     finally:
         try:
             win.erase()
@@ -101,46 +137,54 @@ def modal_box(stdscr, height: int, width: int):
             curses.doupdate()
 
 def text(stdscr, message, default=None):
-    curses.curs_set(1)
-    stdscr.keypad(True)
-    h, w = stdscr.getmaxyx()
-    prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
-    input_width = max(1, min(40, w - len(prompt) - 6))
-    box_width = len(prompt) + input_width + 4
+    with temp_cursor(1), keypad_mode(stdscr):
+        h, w = stdscr.getmaxyx()
+        prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
+        input_width = max(1, min(40, w - len(prompt) - 6))
+        box_width = len(prompt) + input_width + 4
+        # Guard against resize between measurement and drawing
+        _, w = stdscr.getmaxyx()
+        box_width = min(box_width, w)
 
-    with modal_box(stdscr, 3, box_width) as win:
-        try:
-            win.addnstr(1, 2, prompt, box_width - 4)
-        except curses.error:
-            pass
-        curses.echo()
-        try:
-            resp = win.getstr(1, 2 + len(prompt), input_width)
-        except curses.error:
-            resp = b""
-        finally:
-            curses.noecho()
+        with modal_box(stdscr, 3, box_width) as win:
+            try:
+                win.addnstr(1, 2, prompt, box_width - 4)
+            except curses.error:
+                pass
+            try:
+                win.refresh()
+            except curses.error:
+                pass
+            curses.echo()
+            try:
+                resp = win.getstr(1, 2 + len(prompt), input_width)
+            except curses.error:
+                resp = b""
+            finally:
+                curses.noecho()
 
-    curses.curs_set(0)
-    text_val = resp.decode()
+        text_val = resp.decode()
     return default if text_val == "" and default is not None else text_val
 
 
 def confirm(stdscr, message: str) -> bool:
-    curses.curs_set(0)
-    stdscr.keypad(True)
     lines = [message, "Press Enter to confirm, or any other key to cancel."]
     max_line = max(len(line) for line in lines)
 
-    with modal_box(stdscr, len(lines) + 2, max_line + 4) as win:
-        for idx, line in enumerate(lines):
-            x = (max_line - len(line)) // 2 + 2
+    with temp_cursor(0), keypad_mode(stdscr):
+        with modal_box(stdscr, len(lines) + 2, max_line + 4) as win:
+            for idx, line in enumerate(lines):
+                x = (max_line - len(line)) // 2 + 2
+                try:
+                    win.addnstr(1 + idx, x, line, max_line)
+                except curses.error:
+                    pass
             try:
-                win.addnstr(1 + idx, x, line, max_line)
+                win.refresh()
             except curses.error:
                 pass
-        ch = win.getch()
-        return ch in (curses.KEY_ENTER, 10, 13)
+            ch = win.getch()
+    return ch in (curses.KEY_ENTER, 10, 13)
 
 
 def toast(stdscr, msg: str, ms: int = 900):
@@ -736,112 +780,120 @@ def ledger_rows(session):
 def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
     rows = [initial_row]
     index = 0
-    curses.curs_set(0)
-    stdscr.keypad(True)
 
-    desc_w = len(initial_row.description)
-    amt_w = len(f"{initial_row.amount:.2f}")
-    run_w = len(f"{initial_row.running:.2f}")
-    footer_left = date.today().isoformat()
-    footer_right = f"{bal_amt:.2f}"
+    with temp_cursor(0), keypad_mode(stdscr):
+        desc_w = len(initial_row.description)
+        amt_w = len(f"{initial_row.amount:.2f}")
+        run_w = len(f"{initial_row.running:.2f}")
+        footer_left = date.today().isoformat()
 
-    while True:
-        h, w = stdscr.getmaxyx()
-        h = max(1, h)
-        w = max(1, w)
-        visible = h - 1
+        while True:
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            visible = h - 1
 
-        while index < visible // 2:
-            prev = get_prev(rows[0].timestamp)
-            if prev is None:
-                break
-            prev_row = LedgerRow(
-                prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-            )
-            rows.insert(0, prev_row)
-            desc_w = max(desc_w, len(prev_row.description))
-            amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-            run_w = max(run_w, len(f"{prev_row.running:.2f}"))
-            index += 1
+            while index < visible // 2:
+                prev = get_prev(rows[0].timestamp)
+                if prev is None:
+                    break
+                prev_row = LedgerRow(
+                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
+                )
+                rows.insert(0, prev_row)
+                desc_w = max(desc_w, len(prev_row.description))
+                amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
+                run_w = max(run_w, len(f"{prev_row.running:.2f}"))
+                index += 1
 
-        while len(rows) < visible:
-            nxt = get_next(rows[-1].timestamp)
-            if nxt is None:
-                break
-            next_row = LedgerRow(
-                nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-            )
-            rows.append(next_row)
-            desc_w = max(desc_w, len(next_row.description))
-            amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-            run_w = max(run_w, len(f"{next_row.running:.2f}"))
+            while len(rows) < visible:
+                nxt = get_next(rows[-1].timestamp)
+                if nxt is None:
+                    break
+                next_row = LedgerRow(
+                    nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
+                )
+                rows.append(next_row)
+                desc_w = max(desc_w, len(next_row.description))
+                amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
+                run_w = max(run_w, len(f"{next_row.running:.2f}"))
 
-        top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
+            top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
 
-        stdscr.erase()
-        for i in range(visible):
-            line_idx = top + i
-            if line_idx >= len(rows):
-                break
-            r = rows[line_idx]
-            line = (
-                f"{r.date.strftime('%Y-%m-%d')} | "
-                f"{r.description:<{desc_w}} | "
-                f"{r.amount:>{amt_w}.2f} | {r.running:>{run_w}.2f}"
-            )
-            attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+            stdscr.erase()
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(rows):
+                    break
+                r = rows[line_idx]
+                line = (
+                    f"{r.date.strftime('%Y-%m-%d')} | "
+                    f"{r.description:<{desc_w}} | "
+                    f"{r.amount:>{amt_w}.2f} | {r.running:>{run_w}.2f}"
+                )
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
+
+            pos = f"{index + 1}/{len(rows)}"
+            footer_right = f"{bal_amt:.2f} {pos}"
             try:
-                stdscr.addnstr(i, 0, line, w - 1, attr)
+                stdscr.addnstr(h - 1, 0, footer_left, max(0, w))
+                stdscr.addnstr(
+                    h - 1,
+                    max(0, w - len(footer_right)),
+                    footer_right,
+                    len(footer_right),
+                )
             except curses.error:
                 pass
+            stdscr.refresh()
 
-        try:
-            stdscr.addnstr(h - 1, 0, footer_left, max(0, w))
-            stdscr.addnstr(
-                h - 1,
-                max(0, w - len(footer_right)),
-                footer_right,
-                len(footer_right),
-            )
-        except curses.error:
-            pass
-        stdscr.refresh()
-
-        key = stdscr.getch()
-        if key == curses.KEY_RESIZE:
-            curses.update_lines_cols()
-            curses.resize_term(0, 0)
-            stdscr.clearok(True)
-            continue
-        if key == curses.KEY_UP:
-            if index > 0:
-                index -= 1
-            else:
-                prev = get_prev(rows[0].timestamp)
-                if prev is not None:
-                    prev_row = LedgerRow(
-                        prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                    )
-                    rows.insert(0, prev_row)
-                    desc_w = max(desc_w, len(prev_row.description))
-                    amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-                    run_w = max(run_w, len(f"{prev_row.running:.2f}"))
-        elif key == curses.KEY_DOWN:
-            if index < len(rows) - 1:
-                index += 1
-            else:
-                nxt = get_next(rows[-1].timestamp)
-                if nxt is not None:
-                    next_row = LedgerRow(
-                        nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                    )
-                    rows.append(next_row)
-                    desc_w = max(desc_w, len(next_row.description))
-                    amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-                    run_w = max(run_w, len(f"{next_row.running:.2f}"))
+            key = stdscr.getch()
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                curses.resize_term(0, 0)
+                stdscr.clearok(True)
+                continue
+            if key == curses.KEY_UP:
+                if index > 0:
+                    index -= 1
+                else:
+                    prev = get_prev(rows[0].timestamp)
+                    if prev is not None:
+                        prev_row = LedgerRow(
+                            prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
+                        )
+                        rows.insert(0, prev_row)
+                        desc_w = max(desc_w, len(prev_row.description))
+                        amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
+                        run_w = max(run_w, len(f"{prev_row.running:.2f}"))
+            elif key == curses.KEY_DOWN:
+                if index < len(rows) - 1:
                     index += 1
-        elif key == ord("q"):
-            break
+                else:
+                    nxt = get_next(rows[-1].timestamp)
+                    if nxt is not None:
+                        next_row = LedgerRow(
+                            nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
+                        )
+                        rows.append(next_row)
+                        desc_w = max(desc_w, len(next_row.description))
+                        amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
+                        run_w = max(run_w, len(f"{next_row.running:.2f}"))
+                        index += 1
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - visible)
+            elif key == curses.KEY_NPAGE:
+                index = min(len(rows) - 1, index + visible)
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(rows) - 1
+            elif key == ord("q"):
+                break
 
 
 def scroll_menu(
@@ -862,9 +914,6 @@ def scroll_menu(
     otherwise it fills the available screen.
     """
 
-    curses.curs_set(0)
-    stdscr.keypad(True)
-
     footer_l = footer_left if footer_left is not None else date.today().isoformat()
     footer_r = footer_right if footer_right is not None else ""
 
@@ -873,28 +922,67 @@ def scroll_menu(
         max_entry_len, len(header or ""), len(footer_l) + len(footer_r) + 1
     )
 
-    while True:
-        h, w = stdscr.getmaxyx()
-        h = max(1, h)
-        w = max(1, w)
-        offset = 1 if header else 0
-        if boxed:
-            max_visible = max(1, h - 3 - offset)
-            visible = min(len(entries), height or max_visible)
-        else:
-            visible = min(len(entries), height or (h - 1 - offset))
+    with temp_cursor(0), keypad_mode(stdscr):
+        while True:
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            offset = 1 if header else 0
+            if boxed:
+                max_visible = max(1, h - 3 - offset)
+                visible = min(len(entries), height or max_visible)
+            else:
+                visible = min(len(entries), height or (h - 1 - offset))
 
-        if boxed:
-            content_width = min(base_width, w - 4)
-            total_height = visible + offset + 3
-            with modal_box(stdscr, total_height, content_width + 4) as win:
-                if header:
-                    head_x = max(0, (content_width - len(header)) // 2)
+            pos = f"{index + 1}/{len(entries)}" if entries else "0/0"
+            footer_r_text = f"{footer_r} {pos}".strip()
+
+            if boxed:
+                content_width = min(base_width, w - 4)
+                total_height = visible + offset + 3
+                with modal_box(stdscr, total_height, content_width + 4) as win:
+                    if header:
+                        head_x = max(0, (content_width - len(header)) // 2)
+                        try:
+                            win.addnstr(1, head_x + 2, header, content_width)
+                        except curses.error:
+                            pass
+
+                    top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+                    for i in range(visible):
+                        line_idx = top + i
+                        if line_idx >= len(entries):
+                            break
+                        line = entries[line_idx]
+                        attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                        try:
+                            win.addnstr(1 + offset + i, 2, line, content_width, attr)
+                        except curses.error:
+                            pass
+
                     try:
-                        win.addnstr(1, head_x + 2, header, content_width)
+                        win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
+                        win.addnstr(
+                            total_height - 2,
+                            2 + max(0, content_width - len(footer_r_text)),
+                            footer_r_text,
+                            len(footer_r_text),
+                        )
                     except curses.error:
                         pass
-
+                    try:
+                        win.refresh()
+                    except curses.error:
+                        pass
+                    key = win.getch()
+            else:
+                stdscr.erase()
+                if header:
+                    head_x = max(0, (w - len(header)) // 2)
+                    try:
+                        stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                    except curses.error:
+                        pass
                 top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
                 for i in range(visible):
                     line_idx = top + i
@@ -903,72 +991,48 @@ def scroll_menu(
                     line = entries[line_idx]
                     attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
                     try:
-                        win.addnstr(1 + offset + i, 2, line, content_width, attr)
+                        stdscr.addnstr(i + offset, 0, line, w - 1, attr)
                     except curses.error:
                         pass
 
                 try:
-                    win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
-                    win.addnstr(
-                        total_height - 2,
-                        2 + max(0, content_width - len(footer_r)),
-                        footer_r,
-                        len(footer_r),
+                    stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                    stdscr.addnstr(
+                        h - 1,
+                        max(0, w - len(footer_r_text)),
+                        footer_r_text,
+                        len(footer_r_text),
                     )
                 except curses.error:
                     pass
+                stdscr.refresh()
+                key = stdscr.getch()
 
-                key = win.getch()
-        else:
-            stdscr.erase()
-            if header:
-                head_x = max(0, (w - len(header)) // 2)
-                try:
-                    stdscr.addnstr(0, head_x, header, max(0, w - head_x))
-                except curses.error:
-                    pass
-            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
-            for i in range(visible):
-                line_idx = top + i
-                if line_idx >= len(entries):
-                    break
-                line = entries[line_idx]
-                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
-                try:
-                    stdscr.addnstr(i + offset, 0, line, w - 1, attr)
-                except curses.error:
-                    pass
-
-            try:
-                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
-                stdscr.addnstr(
-                    h - 1,
-                    max(0, w - len(footer_r)),
-                    footer_r,
-                    len(footer_r),
-                )
-            except curses.error:
-                pass
-            stdscr.refresh()
-            key = stdscr.getch()
-
-        if key == curses.KEY_RESIZE:
-            curses.update_lines_cols()
-            curses.resize_term(0, 0)
-            stdscr.clearok(True)
-            continue
-        if key == curses.KEY_UP and index > 0:
-            index -= 1
-        elif key == curses.KEY_DOWN and index < len(entries) - 1:
-            index += 1
-        elif key in (curses.KEY_ENTER, 10, 13):
-            return index
-        elif key == ord("a") and allow_add:
-            return -1
-        elif key == ord("d") and allow_delete:
-            return ("delete", index)
-        elif key == ord("q"):
-            return None
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                curses.resize_term(0, 0)
+                stdscr.clearok(True)
+                continue
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                index += 1
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - visible)
+            elif key == curses.KEY_NPAGE:
+                index = min(len(entries) - 1, index + visible)
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(entries) - 1
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return index
+            elif key == ord("a") and allow_add:
+                return -1
+            elif key == ord("d") and allow_delete:
+                return ("delete", index)
+            elif key == ord("q"):
+                return None
 
 
 def ledger_view(stdscr) -> None:
@@ -1015,73 +1079,76 @@ def ledger_view(stdscr) -> None:
 def goals_curses(stdscr, entries, index, header=None, footer_right=""):
     """Display goals list with controls for add, delete, edit, and toggle."""
 
-    curses.curs_set(0)
-    stdscr.keypad(True)
+    with temp_cursor(0), keypad_mode(stdscr):
+        while True:
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            offset = 1 if header else 0
+            visible = min(len(entries), h - 1 - offset)
+            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
 
-    while True:
-        h, w = stdscr.getmaxyx()
-        h = max(1, h)
-        w = max(1, w)
-        offset = 1 if header else 0
-        visible = min(len(entries), h - 1 - offset)
-        top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+            stdscr.erase()
+            if header:
+                head_x = max(0, (w - len(header)) // 2)
+                try:
+                    stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                except curses.error:
+                    pass
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(entries):
+                    break
+                line = entries[line_idx]
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
 
-        stdscr.erase()
-        if header:
-            head_x = max(0, (w - len(header)) // 2)
+            footer_l = date.today().isoformat()
+            pos = f"{index + 1}/{len(entries)}" if entries else "0/0"
+            footer_r = f"{footer_right} {pos}".strip()
             try:
-                stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                stdscr.addnstr(
+                    h - 1,
+                    max(0, w - len(footer_r)),
+                    footer_r,
+                    len(footer_r),
+                )
             except curses.error:
                 pass
-        for i in range(visible):
-            line_idx = top + i
-            if line_idx >= len(entries):
-                break
-            line = entries[line_idx]
-            attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
-            try:
-                stdscr.addnstr(i + offset, 0, line, w - 1, attr)
-            except curses.error:
-                pass
+            stdscr.refresh()
 
-        footer_l = date.today().isoformat()
-        try:
-            stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
-            stdscr.addnstr(
-                h - 1,
-                max(0, w - len(footer_right)),
-                footer_right,
-                len(footer_right),
-            )
-        except curses.error:
-            pass
-        stdscr.refresh()
-
-        key = stdscr.getch()
-        if key == curses.KEY_RESIZE:
-            curses.update_lines_cols()
-            curses.resize_term(0, 0)
-            stdscr.clearok(True)
-            continue
-        if key == curses.KEY_UP and index > 0:
-            index -= 1
-        elif key == curses.KEY_DOWN and index < len(entries) - 1:
-            index += 1
-        elif key in (curses.KEY_ENTER, 10, 13):
-            return "edit", index
-        elif key == ord("a"):
-            return "add", None
-        elif key == ord("d") and entries:
-            return "delete", index
-        elif key == ord("t") and entries:
-            return "toggle", index
-        elif key == ord("q"):
-            return "quit", None
-
-        if index < top:
-            top = index
-        elif index >= top + visible:
-            top = index - visible + 1
+            key = stdscr.getch()
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                curses.resize_term(0, 0)
+                stdscr.clearok(True)
+                continue
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                index += 1
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - visible)
+            elif key == curses.KEY_NPAGE:
+                index = min(len(entries) - 1, index + visible)
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(entries) - 1
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return "edit", index
+            elif key == ord("a"):
+                return "add", None
+            elif key == ord("d") and entries:
+                return "delete", index
+            elif key == ord("t") and entries:
+                return "toggle", index
+            elif key == ord("q"):
+                return "quit", None
 
 
 def wants_goals_menu(stdscr) -> None:
@@ -1131,38 +1198,41 @@ def wants_goals_menu(stdscr) -> None:
 
 
 def main(stdscr) -> None:
-    curses.curs_set(0)
-    stdscr.keypad(True)
-    init_db()
-    while True:
-        choice = select(
-            stdscr,
-            "Select an option",
-            choices=[
-                "List transactions",
-                "Edit bills",
-                "Edit income",
-                "Ledger",
-                "Set balance",
-                "Wants/Goals",
-                "Quit",
-            ],
-            boxed=False,
-        )
-        if choice == "List transactions":
-            list_transactions(stdscr)
-        elif choice == "Edit bills":
-            edit_recurring(stdscr, False)
-        elif choice == "Edit income":
-            edit_recurring(stdscr, True)
-        elif choice == "Ledger":
-            ledger_view(stdscr)
-        elif choice == "Set balance":
-            set_balance(stdscr)
-        elif choice == "Wants/Goals":
-            wants_goals_menu(stdscr)
-        else:
-            break
+    with temp_cursor(0), keypad_mode(stdscr):
+        try:
+            curses.use_default_colors()
+        except curses.error:  # pragma: no cover - terminals without color
+            pass
+        init_db()
+        while True:
+            choice = select(
+                stdscr,
+                "Select an option",
+                choices=[
+                    "List transactions",
+                    "Edit bills",
+                    "Edit income",
+                    "Ledger",
+                    "Set balance",
+                    "Wants/Goals",
+                    "Quit",
+                ],
+                boxed=False,
+            )
+            if choice == "List transactions":
+                list_transactions(stdscr)
+            elif choice == "Edit bills":
+                edit_recurring(stdscr, False)
+            elif choice == "Edit income":
+                edit_recurring(stdscr, True)
+            elif choice == "Ledger":
+                ledger_view(stdscr)
+            elif choice == "Set balance":
+                set_balance(stdscr)
+            elif choice == "Wants/Goals":
+                wants_goals_menu(stdscr)
+            else:
+                break
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
