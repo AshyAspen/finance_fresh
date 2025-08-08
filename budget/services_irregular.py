@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 import json
 import math
+import random
 from statistics import mean, median, stdev
 from typing import Iterable, Literal
 
@@ -138,10 +139,17 @@ def forecast_irregular(
 ):
     """Forecast irregular events for a category.
 
-    Only the deterministic mode is currently implemented. The forecast is
-    produced using the learned :class:`IrregularState` for the category. When
-    the state is missing or incomplete it will be learned using historical
-    transactions.
+    The forecast is produced using the learned :class:`IrregularState` for the
+    category. When the state is missing or incomplete it will be learned using
+    historical transactions. Two modes are supported:
+
+    ``"deterministic"``
+        Returns a list of ``(date, amount)`` tuples using the average gap and
+        typical amount.
+
+    ``"monte_carlo"``
+        Runs ``n`` Monte Carlo simulations and returns percentile series in the
+        form ``{"p50": [(date, val)], ...}``.
 
     Parameters
     ----------
@@ -152,18 +160,15 @@ def forecast_irregular(
     start, end : date
         Forecast window (inclusive).
     mode : str, optional
-        ``"deterministic"`` by default. ``"monte_carlo"`` is not implemented.
+        ``"deterministic"`` by default.
     n : int, optional
-        Unused for deterministic mode.
+        Number of runs for ``"monte_carlo"`` mode.
 
     Returns
     -------
-    list[tuple[date, float]]
+    list[tuple[date, float]] | dict[str, list[tuple[date, float]]]
         Forecasted events aggregated per day.
     """
-
-    if mode != "deterministic":  # pragma: no cover - other modes not needed yet
-        raise NotImplementedError("Only deterministic mode is implemented")
 
     # Fetch the category to obtain parameters like window_days
     category: IrregularCategory | None = session.get(IrregularCategory, category_id)
@@ -189,71 +194,137 @@ def forecast_irregular(
     if (
         state is None
         or state.avg_gap_days is None
-        or state.median_amount is None
+        or (
+            state.median_amount is None
+            and (state.amount_mu is None or state.amount_sigma is None)
+        )
     ):
+        if mode == "monte_carlo":
+            return {"p50": [], "p80": [], "p90": []}
         return []
 
-    # Determine amount per event. Fall back to mean of recent history if needed
-    amount = state.median_amount
-    if amount is None:
-        end_dt = datetime.combine(end, datetime.min.time())
-        start_dt = end_dt - timedelta(days=category.window_days)
-        txns = (
-            session.query(Transaction)
-            .filter(
-                Transaction.timestamp >= start_dt,
-                Transaction.timestamp <= end_dt,
-            )
-            .order_by(Transaction.timestamp)
-            .all()
-        )
-        txns = [t for t in txns if match_category_id(session, t.description) == category_id]
-        amounts = [abs(t.amount) for t in txns if abs(t.amount) > 0]
-        amount = mean(amounts) if amounts else None
+    if mode == "deterministic":
+        # Determine amount per event. Fall back to mean of recent history if needed
+        amount = state.median_amount
         if amount is None:
-            return []
+            end_dt = datetime.combine(end, datetime.min.time())
+            start_dt = end_dt - timedelta(days=category.window_days)
+            txns = (
+                session.query(Transaction)
+                .filter(
+                    Transaction.timestamp >= start_dt,
+                    Transaction.timestamp <= end_dt,
+                )
+                .order_by(Transaction.timestamp)
+                .all()
+            )
+            txns = [t for t in txns if match_category_id(session, t.description) == category_id]
+            amounts = [abs(t.amount) for t in txns if abs(t.amount) > 0]
+            amount = mean(amounts) if amounts else None
+            if amount is None:
+                return []
 
-    # Seed the next event date using last_event_at (or start) and avg gap
-    gap_days = math.ceil(state.avg_gap_days if state.avg_gap_days else 7)
-    last_event_date = state.last_event_at.date() if state.last_event_at else start
-    next_date = last_event_date + timedelta(days=gap_days)
+        # Seed the next event date using last_event_at (or start) and avg gap
+        gap_days = math.ceil(state.avg_gap_days if state.avg_gap_days else 7)
+        last_event_date = state.last_event_at.date() if state.last_event_at else start
+        next_date = last_event_date + timedelta(days=gap_days)
 
-    # Helper for weekday snapping
-    weekday_probs = None
-    best_weekday = None
-    if state.weekday_probs:
-        try:
-            weekday_probs = json.loads(state.weekday_probs)
-            if isinstance(weekday_probs, list) and len(weekday_probs) == 7:
-                best_weekday = max(range(7), key=lambda i: weekday_probs[i])
-        except Exception:  # pragma: no cover - defensive
-            weekday_probs = None
+        # Helper for weekday snapping
+        weekday_probs = None
+        best_weekday = None
+        if state.weekday_probs:
+            try:
+                weekday_probs = json.loads(state.weekday_probs)
+                if isinstance(weekday_probs, list) and len(weekday_probs) == 7:
+                    best_weekday = max(range(7), key=lambda i: weekday_probs[i])
+            except Exception:  # pragma: no cover - defensive
+                weekday_probs = None
 
-    def snap_weekday(d: date) -> date:
-        if best_weekday is None:
+        def snap_weekday(d: date) -> date:
+            if best_weekday is None:
+                return d
+            while d.weekday() != best_weekday:
+                d += timedelta(days=1)
             return d
-        while d.weekday() != best_weekday:
-            d += timedelta(days=1)
-        return d
 
-    next_date = snap_weekday(next_date)
+        next_date = snap_weekday(next_date)
 
-    # Catch up if the seeded date is before the forecast start
-    while next_date < start:
-        next_date = snap_weekday(next_date + timedelta(days=gap_days))
+        # Catch up if the seeded date is before the forecast start
+        while next_date < start:
+            next_date = snap_weekday(next_date + timedelta(days=gap_days))
 
-    events: list[tuple[date, float]] = []
-    while next_date <= end:
-        events.append((next_date, float(amount)))
-        next_date = snap_weekday(next_date + timedelta(days=gap_days))
+        events: list[tuple[date, float]] = []
+        while next_date <= end:
+            events.append((next_date, float(amount)))
+            next_date = snap_weekday(next_date + timedelta(days=gap_days))
 
-    # Aggregate by day
-    totals: dict[date, float] = {}
-    for d, amt in events:
-        if start <= d <= end:
-            totals[d] = totals.get(d, 0.0) + amt
+        # Aggregate by day
+        totals: dict[date, float] = {}
+        for d, amt in events:
+            if start <= d <= end:
+                totals[d] = totals.get(d, 0.0) + amt
 
-    return sorted(totals.items(), key=lambda x: x[0])
+        return sorted(totals.items(), key=lambda x: x[0])
+
+    elif mode == "monte_carlo":
+        horizon = (end - start).days + 1
+        runs = [[0.0 for _ in range(horizon)] for _ in range(n)]
+
+        weekday_probs = None
+        if state.weekday_probs:
+            try:
+                weekday_probs = json.loads(state.weekday_probs)
+                if not (isinstance(weekday_probs, list) and len(weekday_probs) == 7):
+                    weekday_probs = None
+            except Exception:  # pragma: no cover - defensive
+                weekday_probs = None
+
+        for r in range(n):
+            current_date = state.last_event_at.date() if state.last_event_at else start
+            while True:
+                gap = random.gauss(state.avg_gap_days, 0.35 * state.avg_gap_days)
+                gap = max(1.0, gap)
+                gap = min(gap, 30.0)
+                gap = int(round(gap))
+                current_date = current_date + timedelta(days=gap)
+                if weekday_probs:
+                    target = random.choices(range(7), weights=weekday_probs)[0]
+                    while current_date.weekday() != target:
+                        current_date += timedelta(days=1)
+                if current_date > end:
+                    break
+                if current_date < start:
+                    continue
+                if (
+                    state.amount_mu is not None
+                    and state.amount_sigma is not None
+                ):
+                    amount = random.lognormvariate(state.amount_mu, state.amount_sigma)
+                else:
+                    amount = state.median_amount * (1 + random.gauss(0.0, 0.1))
+                idx = (current_date - start).days
+                runs[r][idx] += float(amount)
+
+        def percentile(values: list[float], p: float) -> float:
+            values = sorted(values)
+            k = (len(values) - 1) * p
+            f = math.floor(k)
+            c = math.ceil(k)
+            if f == c:
+                return values[int(k)]
+            return values[f] + (values[c] - values[f]) * (k - f)
+
+        dates = [start + timedelta(days=i) for i in range(horizon)]
+        result: dict[str, list[tuple[date, float]]] = {"p50": [], "p80": [], "p90": []}
+        for i, d in enumerate(dates):
+            day_vals = [runs[r][i] for r in range(n)]
+            result["p50"].append((d, float(percentile(day_vals, 0.5))))
+            result["p80"].append((d, float(percentile(day_vals, 0.8))))
+            result["p90"].append((d, float(percentile(day_vals, 0.9))))
+        return result
+
+    else:  # pragma: no cover - defensive
+        raise NotImplementedError(f"Unknown mode: {mode}")
 
 def categories(session: Session) -> list[IrregularCategory]: ...
 
