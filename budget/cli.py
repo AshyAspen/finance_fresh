@@ -506,7 +506,24 @@ def retreat_date(d: date, freq: str) -> date:
 
 
 def months_between(start: date, end: date) -> int:
-    return (end.year - start.year) * 12 + (end.month - start.month)
+    """Return the number of whole months between ``start`` and ``end``.
+
+    ``months_between`` previously ignored the day component of the dates.
+    This meant that when calculating the next occurrence of a monthly
+    recurring item, any date in the next month would be treated as a full
+    month apart even if it fell *before* the recurring day. For example,
+    looking for the next occurrence after ``2025-09-09`` for an event that
+    starts on ``2025-08-16`` incorrectly skipped September and returned
+    October.
+
+    By subtracting one month when the end day is before the start day we
+    ensure only complete months are counted, preventing skipped months.
+    """
+
+    months = (end.year - start.year) * 12 + (end.month - start.month)
+    if end.day < start.day:
+        months -= 1
+    return months
 
 
 def occurrence_on_or_before(start: date, freq: str, target: date) -> date | None:

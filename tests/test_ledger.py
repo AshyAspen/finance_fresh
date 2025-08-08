@@ -276,6 +276,34 @@ def test_next_event_handles_multiple_recurring():
         path.unlink()
 
 
+def test_next_event_monthly_does_not_skip_month():
+    """Monthly recurring items are not skipped when querying mid-month."""
+
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add(
+            Recurring(
+                description="Car Insurance",
+                amount=-100.0,
+                start_date=datetime(2023, 8, 16),
+                frequency="monthly",
+            )
+        )
+        session.commit()
+
+        txns = []
+        recs = session.query(Recurring).all()
+
+        # Looking for the next event after a date early in the following month
+        # should still return the same month's occurrence (September 16th).
+        ev = cli.next_event(datetime(2023, 9, 9), txns, recs)
+        assert ev[0].date() == date(2023, 9, 16)
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_ledger_view_handles_multiple_recurring(monkeypatch):
     Session, path = get_temp_session()
     try:
