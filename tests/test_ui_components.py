@@ -222,7 +222,8 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
     class FakeWin:
         def __init__(self):
             self.keypad_enabled = False
-            self.keys = [27, 91, 66, 10]  # ESC sequence for KEY_DOWN then Enter
+            # Simulate KEY_DOWN followed by Enter across menu iterations
+            self.keys = [cli.curses.KEY_DOWN, 10]
 
         def box(self):
             pass
@@ -235,16 +236,15 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
 
         def keypad(self, flag):
             self.keypad_enabled = flag
-            if flag:
-                self.keys = [cli.curses.KEY_DOWN, 10]
 
         def getch(self):
-            return self.keys.pop(0)
+            return self.keys.pop(0) if self.keys else 10
+
+    fake_win = FakeWin()
 
     def fake_newwin(h, w, y, x):
-        win = FakeWin()
-        captured["win"] = win
-        return win
+        captured["win"] = fake_win
+        return fake_win
 
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
