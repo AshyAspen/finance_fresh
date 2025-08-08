@@ -109,6 +109,73 @@ def test_multiple_events_same_day():
         path.unlink()
 
 
+def test_multiple_recurring_same_day():
+    """Multiple recurring incomes/bills on the same day propagate correctly."""
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2022, 12, 31)),
+                Recurring(
+                    description="Salary",
+                    amount=1000.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+                Recurring(
+                    description="Rent",
+                    amount=-500.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 4))
+        assert rows[0].date == rows[1].date == date(2023, 1, 1)
+        assert {rows[0].description, rows[1].description} == {"Salary", "Rent"}
+        assert rows[2].date == rows[3].date == date(2023, 2, 1)
+        assert {rows[2].description, rows[3].description} == {"Salary", "Rent"}
+
+        running = 0.0
+        for r in rows:
+            running += r.amount
+            assert r.running == running
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_last_day_of_month_propagates_and_recovers():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 31),
+                    frequency="monthly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(itertools.islice(cli.ledger_rows(session), 5))
+        assert [r.date for r in rows] == [
+            date(2023, 1, 31),
+            date(2023, 2, 28),
+            date(2023, 3, 31),
+            date(2023, 4, 30),
+            date(2023, 5, 31),
+        ]
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_ledger_view_displays_all_events(monkeypatch):
     Session, path = get_temp_session()
     try:
@@ -168,5 +235,109 @@ def test_ledger_view_displays_all_events(monkeypatch):
             "Coffee",
             "Lunch",
         ]
+    finally:
+        path.unlink()
+
+
+def test_next_event_handles_multiple_recurring():
+    """``next_event`` returns each recurring item even on the same day."""
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Recurring(
+                    description="Salary",
+                    amount=1000.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+                Recurring(
+                    description="Rent",
+                    amount=-500.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+            ]
+        )
+        session.commit()
+        txns = []
+        recs = session.query(Recurring).all()
+        ev1 = cli.next_event(datetime(2022, 12, 31), txns, recs)
+        ev2 = cli.next_event(ev1[0], txns, recs)
+        ev3 = cli.next_event(ev2[0], txns, recs)
+        ev4 = cli.next_event(ev3[0], txns, recs)
+        assert ev1[0].date() == ev2[0].date() == date(2023, 1, 1)
+        assert {ev1[1], ev2[1]} == {"Salary", "Rent"}
+        assert ev3[0].date() == ev4[0].date() == date(2023, 2, 1)
+        assert {ev3[1], ev4[1]} == {"Salary", "Rent"}
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_ledger_view_handles_multiple_recurring(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2022, 12, 31)),
+                Recurring(
+                    description="Salary",
+                    amount=1000.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+                Recurring(
+                    description="Rent",
+                    amount=-500.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+            ]
+        )
+        session.commit()
+        session.close()
+
+        captured = {}
+
+        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+            rows = [initial_row]
+            prev = get_prev(rows[0].timestamp)
+            if prev is not None:
+                prev_row = cli.LedgerRow(
+                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
+                )
+                rows.insert(0, prev_row)
+            while len(rows) < 4:
+                nxt = get_next(rows[-1].timestamp)
+                if nxt is None:
+                    break
+                next_row = cli.LedgerRow(
+                    nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
+                )
+                rows.append(next_row)
+            captured["rows"] = rows
+
+        class FakeDate(date):
+            @classmethod
+            def today(cls):
+                return cls(2023, 1, 1)
+
+        monkeypatch.setattr(cli, "date", FakeDate)
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(cli, "ledger_curses", fake_curses)
+
+        cli.ledger_view(object())
+        rows = captured["rows"]
+        assert rows[0].date == rows[1].date == date(2023, 1, 1)
+        assert {rows[0].description, rows[1].description} == {"Salary", "Rent"}
+        assert rows[2].date == rows[3].date == date(2023, 2, 1)
+        assert {rows[2].description, rows[3].description} == {"Salary", "Rent"}
+        running = 0.0
+        for r in rows:
+            running += r.amount
+            assert r.running == running
     finally:
         path.unlink()

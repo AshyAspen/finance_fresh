@@ -461,7 +461,11 @@ def add_months(d: date, months: int) -> date:
     month = d.month - 1 + months
     year = d.year + month // 12
     month = month % 12 + 1
-    day = min(d.day, calendar.monthrange(year, month)[1])
+    last_day = calendar.monthrange(year, month)[1]
+    if d.day == calendar.monthrange(d.year, d.month)[1]:
+        day = last_day
+    else:
+        day = min(d.day, last_day)
     return date(year, month, day)
 
 
@@ -582,11 +586,18 @@ def next_event(after: datetime, txns, recs):
         next_txn = txns[idx]
     next_rec = None
     next_rec_time = None
-    for r in recs:
+    for i, r in enumerate(recs):
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, after.date())
+        if occ is not None:
+            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=i)
+            if occ_dt > after and (next_rec_time is None or occ_dt < next_rec_time):
+                next_rec_time = occ_dt
+                next_rec = r
+                continue
         occ = occurrence_after(r.start_date.date(), r.frequency, after.date())
         if occ is None:
             continue
-        occ_dt = datetime.combine(occ, datetime.min.time())
+        occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=i)
         if next_rec_time is None or occ_dt < next_rec_time:
             next_rec_time = occ_dt
             next_rec = r
@@ -605,17 +616,20 @@ def prev_event(before: datetime, txns, recs):
         prev_txn = txns[idx]
     prev_rec = None
     prev_rec_time = None
-    for r in recs:
-        target = before.date()
-        if before.time() == datetime.min.time():
-            target -= timedelta(days=1)
-        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, target)
-        if occ is None:
-            continue
-        occ_dt = datetime.combine(occ, datetime.min.time())
-        if prev_rec_time is None or occ_dt > prev_rec_time:
-            prev_rec_time = occ_dt
-            prev_rec = r
+    for i, r in enumerate(recs):
+        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, before.date())
+        if occ is not None:
+            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=i)
+            if occ_dt >= before:
+                occ_prev = occurrence_on_or_before(
+                    r.start_date.date(), r.frequency, before.date() - timedelta(days=1)
+                )
+                if occ_prev is None:
+                    continue
+                occ_dt = datetime.combine(occ_prev, datetime.min.time()) + timedelta(microseconds=i)
+            if occ_dt < before and (prev_rec_time is None or occ_dt > prev_rec_time):
+                prev_rec_time = occ_dt
+                prev_rec = r
     if prev_txn is None and prev_rec is None:
         return None
     if prev_txn is not None and (prev_rec_time is None or prev_txn.timestamp >= prev_rec_time):
