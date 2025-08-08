@@ -5,7 +5,7 @@ import random
 from statistics import mean, median, stdev
 from typing import Iterable, Literal
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from .models import IrregularCategory, IrregularState, IrregularRule, Transaction
 
@@ -127,6 +127,62 @@ def learn_irregular_state(
 
     session.add(state)
     session.commit()
+    return state
+
+
+def update_irregular_state(state: IrregularState, new_tx: Transaction) -> IrregularState:
+    """Update an existing irregular ``state`` with a new transaction.
+
+    Parameters
+    ----------
+    state : IrregularState
+        The state object to update. It must already be associated with a
+        database session.
+    new_tx : Transaction
+        The newly observed transaction belonging to the state's category.
+    """
+
+    # Update average gap between events using exponential smoothing
+    if state.last_event_at is not None:
+        new_gap = (new_tx.timestamp - state.last_event_at).total_seconds() / 86400.0
+        if new_gap >= 1.0:
+            alpha = state.category.alpha if state.category else 0.3
+            if state.avg_gap_days is None:
+                state.avg_gap_days = new_gap
+            else:
+                state.avg_gap_days = alpha * new_gap + (1 - alpha) * state.avg_gap_days
+
+    # Update median amount with a simple moving approximation
+    amount = abs(new_tx.amount)
+    if amount > 0:
+        alpha = state.category.alpha if state.category else 0.3
+        if state.median_amount is None:
+            state.median_amount = amount
+        else:
+            state.median_amount = alpha * amount + (1 - alpha) * state.median_amount
+
+    # Update weekday probabilities by incrementing the observed weekday
+    try:
+        probs = json.loads(state.weekday_probs) if state.weekday_probs else None
+        if not (isinstance(probs, list) and len(probs) == 7):
+            probs = [1 / 7.0] * 7
+    except Exception:  # pragma: no cover - defensive
+        probs = [1 / 7.0] * 7
+
+    counts = [p for p in probs]
+    counts[new_tx.timestamp.weekday()] += 1
+    total = sum(counts)
+    probs = [c / total for c in counts]
+    state.weekday_probs = json.dumps(probs)
+
+    # Update timestamp of last event
+    state.last_event_at = new_tx.timestamp
+
+    sess = object_session(state)
+    if sess is not None:
+        sess.add(state)
+        sess.commit()
+
     return state
 
 def forecast_irregular(
