@@ -51,6 +51,9 @@ def test_text_prompt_curses(monkeypatch):
             def keypad(self, flag):
                 pass
 
+            def noutrefresh(self):
+                pass
+
         return func(FakeStdScr())
 
     def fake_newwin(h, w, y, x):
@@ -61,7 +64,7 @@ def test_text_prompt_curses(monkeypatch):
             def addnstr(self, *args, **kwargs):
                 pass
 
-            def refresh(self):
+            def noutrefresh(self):
                 pass
 
             def getstr(self, y, x, n):
@@ -77,6 +80,7 @@ def test_text_prompt_curses(monkeypatch):
     monkeypatch.setattr(cli.curses, "echo", lambda: None)
     monkeypatch.setattr(cli.curses, "noecho", lambda: None)
     monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
+    monkeypatch.setattr(cli.curses, "doupdate", lambda: None)
 
     assert cli.text("Prompt") == "hello"
     assert cli.text("Prompt", default="dflt") == "dflt"
@@ -93,6 +97,9 @@ def test_confirm_prompt_curses(monkeypatch):
             def keypad(self, flag):
                 pass
 
+            def noutrefresh(self):
+                pass
+
         return func(FakeStdScr())
 
     def fake_newwin(h, w, y, x):
@@ -103,7 +110,7 @@ def test_confirm_prompt_curses(monkeypatch):
             def addnstr(self, *args, **kwargs):
                 pass
 
-            def refresh(self):
+            def noutrefresh(self):
                 pass
 
             def getch(self):
@@ -117,6 +124,7 @@ def test_confirm_prompt_curses(monkeypatch):
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
+    monkeypatch.setattr(cli.curses, "doupdate", lambda: None)
 
     assert cli.confirm("Sure?") is True
     assert cli.confirm("Sure?") is False
@@ -144,7 +152,7 @@ def test_scroll_menu_handles_curses_error(monkeypatch):
             def erase(self):
                 pass
 
-            def refresh(self):
+            def noutrefresh(self):
                 pass
 
             def keypad(self, flag):
@@ -162,6 +170,7 @@ def test_scroll_menu_handles_curses_error(monkeypatch):
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "newwin", lambda *args, **kwargs: fake_wrapper(lambda w: w))
+    monkeypatch.setattr(cli.curses, "doupdate", lambda: None)
 
     index = cli.scroll_menu(["A", "B"], 0, header="hdr")
     assert index == 0
@@ -182,7 +191,7 @@ def test_scroll_menu_quits_on_q(monkeypatch):
             def erase(self):
                 pass
 
-            def refresh(self):
+            def noutrefresh(self):
                 pass
 
             def keypad(self, flag):
@@ -199,6 +208,7 @@ def test_scroll_menu_quits_on_q(monkeypatch):
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "newwin", lambda *args, **kwargs: fake_wrapper(lambda w: w))
+    monkeypatch.setattr(cli.curses, "doupdate", lambda: None)
 
     index = cli.scroll_menu(["A", "B"], 0)
     assert index is None
@@ -217,6 +227,9 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
             def keypad(self, flag):
                 pass
 
+            def noutrefresh(self):
+                pass
+
         return func(FakeStdScr())
 
     class FakeWin:
@@ -231,7 +244,7 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
         def addnstr(self, *args, **kwargs):
             pass
 
-        def refresh(self):
+        def noutrefresh(self):
             pass
 
         def keypad(self, flag):
@@ -249,6 +262,7 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
     monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
+    monkeypatch.setattr(cli.curses, "doupdate", lambda: None)
 
     index = cli.scroll_menu(["A", "B"], 0, boxed=True)
     assert index == 1

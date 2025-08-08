@@ -90,7 +90,9 @@ def text(message, default=None):
             win.addnstr(1, 2, prompt, box_width - 4)
         except curses.error:
             pass
-        win.refresh()
+        stdscr.noutrefresh()
+        win.noutrefresh()
+        curses.doupdate()
         curses.echo()
         try:
             resp = win.getstr(1, 2 + len(prompt), input_width)
@@ -121,7 +123,9 @@ def confirm(message: str) -> bool:
                 win.addnstr(1 + idx, x, line, max_line)
             except curses.error:
                 pass
-        win.refresh()
+        stdscr.noutrefresh()
+        win.noutrefresh()
+        curses.doupdate()
         ch = win.getch()
         return ch in (curses.KEY_ENTER, 10, 13)
 
@@ -756,7 +760,8 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 )
             except curses.error:
                 pass
-            stdscr.refresh()
+            stdscr.noutrefresh()
+            curses.doupdate()
 
             key = stdscr.getch()
             if key == curses.KEY_UP:
@@ -866,7 +871,9 @@ def scroll_menu(
                     )
                 except curses.error:
                     pass
-                win.refresh()
+                stdscr.noutrefresh()
+                win.noutrefresh()
+                curses.doupdate()
                 key = win.getch()
             else:
                 stdscr.erase()
@@ -897,7 +904,8 @@ def scroll_menu(
                     )
                 except curses.error:
                     pass
-                stdscr.refresh()
+                stdscr.noutrefresh()
+                curses.doupdate()
                 key = stdscr.getch()
 
             if key == curses.KEY_UP and index > 0:
@@ -1003,7 +1011,8 @@ def goals_curses(entries, index, header=None, footer_right=""):
                 )
             except curses.error:
                 pass
-            stdscr.refresh()
+            stdscr.noutrefresh()
+            curses.doupdate()
 
             key = stdscr.getch()
             if key == curses.KEY_UP and index > 0:
