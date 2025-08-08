@@ -576,10 +576,21 @@ def count_occurrences(start: date, freq: str, target: date) -> int:
 
 def next_event(after: datetime, txns, recs):
     next_txn = None
-    txn_times = [t.timestamp for t in txns]
+    txn_times = []
+    last_ts = None
+    offset = 0
+    for t in txns:
+        ts = t.timestamp
+        if last_ts is not None and ts == last_ts:
+            offset += 1
+        else:
+            offset = 0
+            last_ts = ts
+        txn_times.append(ts + timedelta(microseconds=offset))
     idx = bisect_right(txn_times, after)
     if idx < len(txns):
         next_txn = txns[idx]
+        next_txn_time = txn_times[idx]
     next_rec = None
     next_rec_time = None
     for r in recs:
@@ -592,17 +603,28 @@ def next_event(after: datetime, txns, recs):
             next_rec = r
     if next_txn is None and next_rec is None:
         return None
-    if next_txn is not None and (next_rec_time is None or next_txn.timestamp <= next_rec_time):
-        return next_txn.timestamp, next_txn.description, next_txn.amount
+    if next_txn is not None and (next_rec_time is None or next_txn_time <= next_rec_time):
+        return next_txn_time, next_txn.description, next_txn.amount
     return next_rec_time, next_rec.description, next_rec.amount
 
 
 def prev_event(before: datetime, txns, recs):
     prev_txn = None
-    txn_times = [t.timestamp for t in txns]
+    txn_times = []
+    last_ts = None
+    offset = 0
+    for t in txns:
+        ts = t.timestamp
+        if last_ts is not None and ts == last_ts:
+            offset += 1
+        else:
+            offset = 0
+            last_ts = ts
+        txn_times.append(ts + timedelta(microseconds=offset))
     idx = bisect_left(txn_times, before) - 1
     if idx >= 0:
         prev_txn = txns[idx]
+        prev_txn_time = txn_times[idx]
     prev_rec = None
     prev_rec_time = None
     for r in recs:
@@ -618,8 +640,8 @@ def prev_event(before: datetime, txns, recs):
             prev_rec = r
     if prev_txn is None and prev_rec is None:
         return None
-    if prev_txn is not None and (prev_rec_time is None or prev_txn.timestamp >= prev_rec_time):
-        return prev_txn.timestamp, prev_txn.description, prev_txn.amount
+    if prev_txn is not None and (prev_rec_time is None or prev_txn_time >= prev_rec_time):
+        return prev_txn_time, prev_txn.description, prev_txn.amount
     return prev_rec_time, prev_rec.description, prev_rec.amount
 
 

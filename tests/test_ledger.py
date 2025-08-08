@@ -170,3 +170,43 @@ def test_ledger_view_displays_all_events(monkeypatch):
         ]
     finally:
         path.unlink()
+
+
+def test_next_prev_event_duplicate_timestamps():
+    """All transactions with identical timestamps are navigable."""
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        ts = datetime(2023, 1, 2, 12)
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="A", amount=-1.0, timestamp=ts),
+                Transaction(description="B", amount=-2.0, timestamp=ts),
+            ]
+        )
+        session.commit()
+        txns = session.query(Transaction).order_by(Transaction.timestamp).all()
+
+        seen = []
+        t = datetime(2023, 1, 1)
+        while True:
+            nxt = cli.next_event(t, txns, [])
+            if nxt is None:
+                break
+            seen.append(nxt[1])
+            t = nxt[0]
+        assert seen == ["A", "B"]
+
+        seen = []
+        t = datetime(2023, 1, 3)
+        while True:
+            prev = cli.prev_event(t, txns, [])
+            if prev is None:
+                break
+            seen.append(prev[1])
+            t = prev[0]
+        assert seen == ["B", "A"]
+    finally:
+        session.close()
+        path.unlink()
