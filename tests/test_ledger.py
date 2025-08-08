@@ -139,7 +139,7 @@ def test_ledger_view_displays_all_events(monkeypatch):
 
         captured = {}
 
-        def fake_curses(initial_row, get_prev, get_next, bal_amt):
+        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
             rows = [initial_row]
             while True:
                 prev = get_prev(rows[0].timestamp)
@@ -162,7 +162,7 @@ def test_ledger_view_displays_all_events(monkeypatch):
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(cli, "ledger_curses", fake_curses)
 
-        cli.ledger_view()
+        cli.ledger_view(object())
         assert [r.description for r in captured["rows"]] == [
             "Rent",
             "Coffee",

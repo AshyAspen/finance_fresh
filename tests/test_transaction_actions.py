@@ -34,7 +34,7 @@ def test_add_transaction_with_date(monkeypatch):
             cli, "text", make_prompt(["Groceries", "2023-02-01", "20.5"])
         )
 
-        cli.add_transaction()
+        cli.add_transaction(object())
 
         session = Session()
         txns = session.query(Transaction).all()
@@ -65,7 +65,7 @@ def test_edit_transaction(monkeypatch):
             cli, "text", make_prompt(["New", "10.0", "2023-03-03"])
         )
 
-        cli.edit_transaction(session, txn)
+        cli.edit_transaction(object(), session, txn)
         session.refresh(txn)
         assert txn.description == "New"
         assert txn.amount == 10.0
@@ -80,7 +80,7 @@ def test_set_balance(monkeypatch):
     try:
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(cli, "text", make_prompt(["100.0"]))
-        cli.set_balance()
+        cli.set_balance(object())
         session = Session()
         bal = session.get(Balance, 1)
         assert bal is not None
@@ -105,7 +105,7 @@ def test_list_transactions_columns(monkeypatch):
 
         captured = {}
 
-        def fake_scroll(entries, index, **kwargs):
+        def fake_scroll(stdscr, entries, index, **kwargs):
             captured["entries"] = entries
             captured["kwargs"] = kwargs
             return None
@@ -113,7 +113,7 @@ def test_list_transactions_columns(monkeypatch):
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
 
-        cli.list_transactions()
+        cli.list_transactions(object())
 
         titles = captured["entries"]
         assert titles[0] == "2023-01-01 | Short  |  5.00"
@@ -142,14 +142,14 @@ def test_delete_transaction(monkeypatch):
 
         responses = iter([("delete", 0), None])
 
-        def fake_scroll(entries, index, **kwargs):
+        def fake_scroll(stdscr, entries, index, **kwargs):
             return next(responses)
 
         monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
         monkeypatch.setattr(cli, "SessionLocal", Session)
-        monkeypatch.setattr(cli, "confirm", lambda msg: True)
+        monkeypatch.setattr(cli, "confirm", lambda stdscr, msg: True)
 
-        cli.list_transactions()
+        cli.list_transactions(object())
 
         session = Session()
         assert session.query(Transaction).count() == 0
@@ -174,19 +174,19 @@ def test_add_transaction_from_list(monkeypatch):
 
         responses = iter([-1, None])
 
-        def fake_scroll(entries, index, **kwargs):
+        def fake_scroll(stdscr, entries, index, **kwargs):
             return next(responses)
 
         called = {}
 
-        def fake_add():
+        def fake_add(stdscr):
             called["added"] = True
 
         monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(cli, "add_transaction", fake_add)
 
-        cli.list_transactions()
+        cli.list_transactions(object())
 
         assert called.get("added") is True
     finally:

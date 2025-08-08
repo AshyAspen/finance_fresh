@@ -7,7 +7,7 @@ from budget import cli
 def test_select_uses_scroll_menu(monkeypatch):
     captured = {}
 
-    def fake_scroll(entries, index, header=None, **kwargs):
+    def fake_scroll(stdscr, entries, index, header=None, **kwargs):
         captured["entries"] = entries
         captured["index"] = index
         captured["header"] = header
@@ -31,7 +31,7 @@ def test_select_uses_scroll_menu(monkeypatch):
 
     monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
 
-    result = cli.select("Pick", ["A", ("B title", "b"), "C"], default="b")
+    result = cli.select(object(), "Pick", ["A", ("B title", "b"), "C"], default="b")
 
     assert captured["entries"] == ["A", "B title", "C"]
     assert captured["index"] == 1
@@ -43,15 +43,12 @@ def test_select_uses_scroll_menu(monkeypatch):
 def test_text_prompt_curses(monkeypatch):
     responses = [b"hello", b""]
 
-    def fake_wrapper(func):
-        class FakeStdScr:
-            def getmaxyx(self):
-                return (24, 80)
+    class FakeStdScr:
+        def getmaxyx(self):
+            return (24, 80)
 
-            def keypad(self, flag):
-                pass
-
-        return func(FakeStdScr())
+        def keypad(self, flag):
+            pass
 
     def fake_newwin(h, w, y, x):
         class FakeWin:
@@ -72,28 +69,25 @@ def test_text_prompt_curses(monkeypatch):
 
         return FakeWin()
 
-    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "echo", lambda: None)
     monkeypatch.setattr(cli.curses, "noecho", lambda: None)
     monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
-    assert cli.text("Prompt") == "hello"
-    assert cli.text("Prompt", default="dflt") == "dflt"
+    stdscr = FakeStdScr()
+    assert cli.text(stdscr, "Prompt") == "hello"
+    assert cli.text(stdscr, "Prompt", default="dflt") == "dflt"
 
 
 def test_confirm_prompt_curses(monkeypatch):
     keys = [10, ord("x")]
 
-    def fake_wrapper(func):
-        class FakeStdScr:
-            def getmaxyx(self):
-                return (24, 80)
+    class FakeStdScr:
+        def getmaxyx(self):
+            return (24, 80)
 
-            def keypad(self, flag):
-                pass
-
-        return func(FakeStdScr())
+        def keypad(self, flag):
+            pass
 
     def fake_newwin(h, w, y, x):
         class FakeWin:
@@ -114,93 +108,75 @@ def test_confirm_prompt_curses(monkeypatch):
 
         return FakeWin()
 
-    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
-    assert cli.confirm("Sure?") is True
-    assert cli.confirm("Sure?") is False
+    stdscr = FakeStdScr()
+    assert cli.confirm(stdscr, "Sure?") is True
+    assert cli.confirm(stdscr, "Sure?") is False
 
 
 def test_scroll_menu_handles_curses_error(monkeypatch):
-    class DummySession:
-        def get(self, model, ident):
-            return None
+    class FakeWin:
+        def getmaxyx(self):
+            return (0, 0)
 
-        def close(self):
+        def addnstr(self, *args, **kwargs):
+            raise cli.curses.error
+
+        def addstr(self, *args, **kwargs):
+            raise cli.curses.error
+
+        def erase(self):
             pass
 
-    def fake_wrapper(func):
-        class FakeWin:
-            def getmaxyx(self):
-                return (0, 0)
+        def refresh(self):
+            pass
 
-            def addnstr(self, *args, **kwargs):
-                raise cli.curses.error
+        def keypad(self, flag):
+            pass
 
-            def addstr(self, *args, **kwargs):
-                raise cli.curses.error
+        def getch(self):
+            return 10  # Enter to select
 
-            def erase(self):
-                pass
+        def box(self):
+            pass
 
-            def refresh(self):
-                pass
-
-            def keypad(self, flag):
-                pass
-
-            def getch(self):
-                return 10  # Enter to select
-
-            def box(self):
-                pass
-
-        return func(FakeWin())
-
-    monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
-    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
-    monkeypatch.setattr(cli.curses, "newwin", lambda *args, **kwargs: fake_wrapper(lambda w: w))
 
-    index = cli.scroll_menu(["A", "B"], 0, header="hdr")
+    index = cli.scroll_menu(FakeWin(), ["A", "B"], 0, header="hdr")
     assert index == 0
 
 
 def test_scroll_menu_quits_on_q(monkeypatch):
-    def fake_wrapper(func):
-        class FakeWin:
-            def getmaxyx(self):
-                return (24, 80)
+    class FakeWin:
+        def getmaxyx(self):
+            return (24, 80)
 
-            def addnstr(self, *args, **kwargs):
-                pass
+        def addnstr(self, *args, **kwargs):
+            pass
 
-            def addstr(self, *args, **kwargs):
-                pass
+        def addstr(self, *args, **kwargs):
+            pass
 
-            def erase(self):
-                pass
+        def erase(self):
+            pass
 
-            def refresh(self):
-                pass
+        def refresh(self):
+            pass
 
-            def keypad(self, flag):
-                pass
+        def keypad(self, flag):
+            pass
 
-            def getch(self):
-                return ord("q")
+        def getch(self):
+            return ord("q")
 
-            def box(self):
-                pass
+        def box(self):
+            pass
 
-        return func(FakeWin())
-
-    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
-    monkeypatch.setattr(cli.curses, "newwin", lambda *args, **kwargs: fake_wrapper(lambda w: w))
 
-    index = cli.scroll_menu(["A", "B"], 0)
+    index = cli.scroll_menu(FakeWin(), ["A", "B"], 0)
     assert index is None
 
 
@@ -209,20 +185,16 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
 
     captured = {}
 
-    def fake_wrapper(func):
-        class FakeStdScr:
-            def getmaxyx(self):
-                return (24, 80)
+    class FakeStdScr:
+        def getmaxyx(self):
+            return (24, 80)
 
-            def keypad(self, flag):
-                pass
-
-        return func(FakeStdScr())
+        def keypad(self, flag):
+            pass
 
     class FakeWin:
         def __init__(self):
             self.keypad_enabled = False
-            # Simulate KEY_DOWN followed by Enter across menu iterations
             self.keys = [cli.curses.KEY_DOWN, 10]
 
         def box(self):
@@ -246,17 +218,16 @@ def test_boxed_scroll_menu_respects_arrow_keys(monkeypatch):
         captured["win"] = fake_win
         return fake_win
 
-    monkeypatch.setattr(cli.curses, "wrapper", fake_wrapper)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
     monkeypatch.setattr(cli.curses, "newwin", fake_newwin)
 
-    index = cli.scroll_menu(["A", "B"], 0, boxed=True)
+    index = cli.scroll_menu(FakeStdScr(), ["A", "B"], 0, boxed=True)
     assert index == 1
     assert captured["win"].keypad_enabled is True
 
 
 def test_select_returns_none_on_quit(monkeypatch):
-    def fake_scroll(entries, index, header=None, **kwargs):
+    def fake_scroll(stdscr, entries, index, header=None, **kwargs):
         return None
 
     monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
@@ -276,20 +247,25 @@ def test_select_returns_none_on_quit(monkeypatch):
 
     monkeypatch.setattr(cli, "SessionLocal", lambda: DummySession())
 
-    result = cli.select("Pick", ["A", "B"])
+    result = cli.select(object(), "Pick", ["A", "B"])
     assert result is None
 
 
 def test_main_menu_not_boxed(monkeypatch):
     captured = {}
 
-    def fake_select(message, choices, default=None, boxed=True):
+    def fake_select(stdscr, message, choices, default=None, boxed=True):
         captured["boxed"] = boxed
         return "Quit"
 
+    class FakeStdScr:
+        def keypad(self, flag):
+            pass
+
     monkeypatch.setattr(cli, "select", fake_select)
     monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
 
-    cli.main()
+    cli.main(FakeStdScr())
 
     assert captured.get("boxed") is False
