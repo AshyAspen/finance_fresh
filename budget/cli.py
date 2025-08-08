@@ -6,6 +6,8 @@ import curses
 import calendar
 from dataclasses import dataclass
 from bisect import bisect_left, bisect_right
+from curses import panel
+from contextlib import contextmanager
 
 from .database import SessionLocal, init_db
 from .models import Transaction, Balance, Recurring, Goal
@@ -74,53 +76,82 @@ def _center_box(stdscr, height: int, width: int) -> "curses.window":
     return win
 
 
-def text(stdscr, message, default=None):
-    """Prompt the user for free-form text input using a boxed overlay."""
+@contextmanager
+def modal_box(stdscr, height: int, width: int):
+    """Create a centered, boxed modal window backed by a panel; auto-cleans on exit."""
+    win = _center_box(stdscr, height, width)
+    try:
+        pnl = panel.new_panel(win)
+    except Exception:  # pragma: no cover - non-curses window in tests
+        pnl = None
+    if pnl is not None:
+        panel.update_panels()
+        curses.doupdate()
+    try:
+        yield win
+    finally:
+        try:
+            win.erase()
+            win.noutrefresh()
+        except (curses.error, AttributeError):  # pragma: no cover - fake windows
+            pass
+        if pnl is not None:
+            pnl.hide()
+            panel.update_panels()
+            curses.doupdate()
 
+def text(stdscr, message, default=None):
     curses.curs_set(1)
     stdscr.keypad(True)
     h, w = stdscr.getmaxyx()
-    h = max(1, h)
-    w = max(1, w)
     prompt = f"{message}" + (f" [{default}]" if default is not None else "") + ": "
     input_width = max(1, min(40, w - len(prompt) - 6))
     box_width = len(prompt) + input_width + 4
-    win = _center_box(stdscr, 3, box_width)
-    try:
-        win.addnstr(1, 2, prompt, box_width - 4)
-    except curses.error:
-        pass
-    win.refresh()
-    curses.echo()
-    try:
-        resp = win.getstr(1, 2 + len(prompt), input_width)
-    except curses.error:
-        resp = b""
-    finally:
-        curses.noecho()
+
+    with modal_box(stdscr, 3, box_width) as win:
+        try:
+            win.addnstr(1, 2, prompt, box_width - 4)
+        except curses.error:
+            pass
+        curses.echo()
+        try:
+            resp = win.getstr(1, 2 + len(prompt), input_width)
+        except curses.error:
+            resp = b""
+        finally:
+            curses.noecho()
+
+    curses.curs_set(0)
     text_val = resp.decode()
-    if text_val == "" and default is not None:
-        return default
-    return text_val
+    return default if text_val == "" and default is not None else text_val
 
 
 def confirm(stdscr, message: str) -> bool:
-    """Prompt the user to confirm an action within a centered box."""
-
     curses.curs_set(0)
     stdscr.keypad(True)
     lines = [message, "Press Enter to confirm, or any other key to cancel."]
     max_line = max(len(line) for line in lines)
-    win = _center_box(stdscr, len(lines) + 2, max_line + 4)
-    for idx, line in enumerate(lines):
-        x = (max_line - len(line)) // 2 + 2
+
+    with modal_box(stdscr, len(lines) + 2, max_line + 4) as win:
+        for idx, line in enumerate(lines):
+            x = (max_line - len(line)) // 2 + 2
+            try:
+                win.addnstr(1 + idx, x, line, max_line)
+            except curses.error:
+                pass
+        ch = win.getch()
+        return ch in (curses.KEY_ENTER, 10, 13)
+
+
+def toast(stdscr, msg: str, ms: int = 900):
+    h, w = stdscr.getmaxyx()
+    box_w = min(max(len(msg) + 4, 12), max(12, w - 2))
+    with modal_box(stdscr, 3, box_w) as win:
         try:
-            win.addnstr(1 + idx, x, line, max_line)
+            win.addnstr(1, 2, msg[: box_w - 4], box_w - 4)
         except curses.error:
             pass
-    win.refresh()
-    ch = win.getch()
-    return ch in (curses.KEY_ENTER, 10, 13)
+        curses.napms(ms)
 
 
 def transaction_form(
@@ -852,42 +883,42 @@ def scroll_menu(
             visible = min(len(entries), height or max_visible)
         else:
             visible = min(len(entries), height or (h - 1 - offset))
-        top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
 
         if boxed:
             content_width = min(base_width, w - 4)
             total_height = visible + offset + 3
-            win = _center_box(stdscr, total_height, content_width + 4)
+            with modal_box(stdscr, total_height, content_width + 4) as win:
+                if header:
+                    head_x = max(0, (content_width - len(header)) // 2)
+                    try:
+                        win.addnstr(1, head_x + 2, header, content_width)
+                    except curses.error:
+                        pass
 
-            if header:
-                head_x = max(0, (content_width - len(header)) // 2)
+                top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+                for i in range(visible):
+                    line_idx = top + i
+                    if line_idx >= len(entries):
+                        break
+                    line = entries[line_idx]
+                    attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                    try:
+                        win.addnstr(1 + offset + i, 2, line, content_width, attr)
+                    except curses.error:
+                        pass
+
                 try:
-                    win.addnstr(1, head_x + 2, header, content_width)
+                    win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
+                    win.addnstr(
+                        total_height - 2,
+                        2 + max(0, content_width - len(footer_r)),
+                        footer_r,
+                        len(footer_r),
+                    )
                 except curses.error:
                     pass
-            for i in range(visible):
-                line_idx = top + i
-                if line_idx >= len(entries):
-                    break
-                line = entries[line_idx]
-                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
-                try:
-                    win.addnstr(1 + offset + i, 2, line, content_width, attr)
-                except curses.error:
-                    pass
 
-            try:
-                win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
-                win.addnstr(
-                    total_height - 2,
-                    2 + max(0, content_width - len(footer_r)),
-                    footer_r,
-                    len(footer_r),
-                )
-            except curses.error:
-                pass
-            win.refresh()
-            key = win.getch()
+                key = win.getch()
         else:
             stdscr.erase()
             if header:
@@ -896,6 +927,7 @@ def scroll_menu(
                     stdscr.addnstr(0, head_x, header, max(0, w - head_x))
                 except curses.error:
                     pass
+            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
             for i in range(visible):
                 line_idx = top + i
                 if line_idx >= len(entries):
