@@ -135,7 +135,125 @@ def forecast_irregular(
     end: date,
     mode: Literal["deterministic", "monte_carlo"] = "deterministic",
     n: int = 500,
-): ...
+):
+    """Forecast irregular events for a category.
+
+    Only the deterministic mode is currently implemented. The forecast is
+    produced using the learned :class:`IrregularState` for the category. When
+    the state is missing or incomplete it will be learned using historical
+    transactions.
+
+    Parameters
+    ----------
+    session : Session
+        Database session.
+    category_id : int
+        Target irregular category.
+    start, end : date
+        Forecast window (inclusive).
+    mode : str, optional
+        ``"deterministic"`` by default. ``"monte_carlo"`` is not implemented.
+    n : int, optional
+        Unused for deterministic mode.
+
+    Returns
+    -------
+    list[tuple[date, float]]
+        Forecasted events aggregated per day.
+    """
+
+    if mode != "deterministic":  # pragma: no cover - other modes not needed yet
+        raise NotImplementedError("Only deterministic mode is implemented")
+
+    # Fetch the category to obtain parameters like window_days
+    category: IrregularCategory | None = session.get(IrregularCategory, category_id)
+    if category is None:
+        raise ValueError(f"Unknown category id {category_id}")
+
+    # Ensure state exists and has the required statistics. If missing, learn it
+    state = (
+        session.query(IrregularState)
+        .filter(IrregularState.category_id == category_id)
+        .one_or_none()
+    )
+    if (
+        state is None
+        or state.avg_gap_days is None
+        or state.median_amount is None
+        or state.last_event_at is None
+    ):
+        learn_start = end - timedelta(days=category.window_days)
+        state = learn_irregular_state(session, category_id, learn_start, end)
+
+    # If we still don't have enough data, nothing to forecast
+    if (
+        state is None
+        or state.avg_gap_days is None
+        or state.median_amount is None
+    ):
+        return []
+
+    # Determine amount per event. Fall back to mean of recent history if needed
+    amount = state.median_amount
+    if amount is None:
+        end_dt = datetime.combine(end, datetime.min.time())
+        start_dt = end_dt - timedelta(days=category.window_days)
+        txns = (
+            session.query(Transaction)
+            .filter(
+                Transaction.timestamp >= start_dt,
+                Transaction.timestamp <= end_dt,
+            )
+            .order_by(Transaction.timestamp)
+            .all()
+        )
+        txns = [t for t in txns if match_category_id(session, t.description) == category_id]
+        amounts = [abs(t.amount) for t in txns if abs(t.amount) > 0]
+        amount = mean(amounts) if amounts else None
+        if amount is None:
+            return []
+
+    # Seed the next event date using last_event_at (or start) and avg gap
+    gap_days = math.ceil(state.avg_gap_days if state.avg_gap_days else 7)
+    last_event_date = state.last_event_at.date() if state.last_event_at else start
+    next_date = last_event_date + timedelta(days=gap_days)
+
+    # Helper for weekday snapping
+    weekday_probs = None
+    best_weekday = None
+    if state.weekday_probs:
+        try:
+            weekday_probs = json.loads(state.weekday_probs)
+            if isinstance(weekday_probs, list) and len(weekday_probs) == 7:
+                best_weekday = max(range(7), key=lambda i: weekday_probs[i])
+        except Exception:  # pragma: no cover - defensive
+            weekday_probs = None
+
+    def snap_weekday(d: date) -> date:
+        if best_weekday is None:
+            return d
+        while d.weekday() != best_weekday:
+            d += timedelta(days=1)
+        return d
+
+    next_date = snap_weekday(next_date)
+
+    # Catch up if the seeded date is before the forecast start
+    while next_date < start:
+        next_date = snap_weekday(next_date + timedelta(days=gap_days))
+
+    events: list[tuple[date, float]] = []
+    while next_date <= end:
+        events.append((next_date, float(amount)))
+        next_date = snap_weekday(next_date + timedelta(days=gap_days))
+
+    # Aggregate by day
+    totals: dict[date, float] = {}
+    for d, amt in events:
+        if start <= d <= end:
+            totals[d] = totals.get(d, 0.0) + amt
+
+    return sorted(totals.items(), key=lambda x: x[0])
 
 def categories(session: Session) -> list[IrregularCategory]: ...
 
