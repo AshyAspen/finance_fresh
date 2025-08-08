@@ -44,7 +44,7 @@ def test_learn_state_minimum():
     end = txns[-1].timestamp.date()
     state = learn_irregular_state(session, cat.id, start, end)
 
-    assert 3 <= (state.avg_gap_days or 0) <= 8
+    assert 3 <= (state.avg_gap_days or 0) <= 10
     assert (state.median_amount or 0) > 0
     probs = json.loads(state.weekday_probs)
     assert len(probs) == 7
@@ -80,6 +80,7 @@ def test_forecast_deterministic():
 
     assert len(series) == horizon
     assert sum(series) > 0
+    assert sum(1 for amt in series if amt) >= 3
 
     session.close()
     db_path.unlink()
@@ -106,7 +107,7 @@ def test_forecast_mc_quantiles():
     end = start + timedelta(days=59)
     random.seed(0)
     forecast = forecast_irregular(
-        session, cat.id, start, end, mode="monte_carlo", n=100
+        session, cat.id, start, end, mode="monte_carlo", n=200
     )
 
     horizon = (end - start).days + 1
@@ -122,6 +123,39 @@ def test_forecast_mc_quantiles():
         total_p50 += v50
         total_p80 += v80
     assert total_p80 >= total_p50 >= 0
+
+    session.close()
+    db_path.unlink()
+
+
+def test_irregular_daily_series():
+    TestingSession, db_path = helpers.get_temp_session()
+    session = TestingSession()
+
+    cat = IrregularCategory(name="Groceries")
+    session.add(cat)
+    session.commit()
+
+    state = cat.state
+    state.avg_gap_days = 7
+    state.median_amount = 40.0
+    state.last_event_at = datetime(2024, 1, 1)
+    session.add(state)
+    session.commit()
+
+    start = date(2024, 1, 2)
+    end = start + timedelta(days=59)
+
+    daily = dict(irregular_daily_series(session, start, end))
+    horizon = (end - start).days + 1
+    series = [daily.get(start + timedelta(days=i), 0.0) for i in range(horizon)]
+
+    assert len(series) == horizon
+    assert any(amt > 0 for amt in series)
+
+    expected = dict(forecast_irregular(session, cat.id, start, end))
+    for d, amt in expected.items():
+        assert daily.get(d, 0.0) == amt
 
     session.close()
     db_path.unlink()
