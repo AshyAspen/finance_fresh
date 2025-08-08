@@ -3,7 +3,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 # Ensure the project root is on the Python path
@@ -18,6 +18,12 @@ def get_temp_session():
     engine = create_engine(f"sqlite:///{db_path}", future=True)
     TestingSession = sessionmaker(bind=engine)
     database.Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO accounts (id, name, type) VALUES (1, 'Default', 'checking')"
+            )
+        )
     return TestingSession, Path(db_path)
 
 
