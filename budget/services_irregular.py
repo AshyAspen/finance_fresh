@@ -12,7 +12,20 @@ from .models import IrregularCategory, IrregularState, IrregularRule, Transactio
 
 def ensure_category(session: Session, name: str, **kwargs) -> IrregularCategory: ...
 
-def get_or_create_state(session: Session, category_id: int) -> IrregularState: ...
+
+def get_or_create_state(session: Session, category_id: int) -> IrregularState:
+    """Return the :class:`IrregularState` for ``category_id`` creating it if missing."""
+
+    state = (
+        session.query(IrregularState)
+        .filter(IrregularState.category_id == category_id)
+        .one_or_none()
+    )
+    if state is None:
+        state = IrregularState(category_id=category_id)
+        session.add(state)
+        session.commit()
+    return state
 
 def learn_irregular_state(
     session: Session,
@@ -415,10 +428,7 @@ def irregular_daily_series(
         .filter(IrregularCategory.active.is_(True))
         .all()
     )
-    horizon = (end - start).days + 1
-    totals: dict[date, float] = {
-        start + timedelta(days=i): 0.0 for i in range(horizon)
-    }
+    totals: dict[date, float] = {}
     for cat in cats:
         forecast = forecast_irregular(session, cat.id, start, end, mode=mode)
         series: Iterable[tuple[date, float]]
@@ -428,7 +438,7 @@ def irregular_daily_series(
             series = forecast  # type: ignore[assignment]
         for d, amt in series:
             if start <= d <= end and amt:
-                totals[d] += amt
+                totals[d] = totals.get(d, 0.0) + amt
     return sorted(totals.items(), key=lambda x: x[0])
 
 

@@ -17,8 +17,16 @@ from .models import (
     Goal,
     IrregularCategory,
     IrregularRule,
+    IrregularState,
 )
-from .services_irregular import irregular_daily_series, learn_irregular_state, categories
+from .services_irregular import (
+    irregular_daily_series,
+    learn_irregular_state,
+    categories,
+    match_category_id,
+    update_irregular_state,
+    get_or_create_state,
+)
 
 FREQUENCIES = [
     "weekly",
@@ -268,6 +276,21 @@ def add_transaction(stdscr) -> None:
     txn = Transaction(description=description, amount=amount, timestamp=timestamp)
     session.add(txn)
     session.commit()
+
+    category_id = match_category_id(session, txn.description)
+    if category_id is not None:
+        state = get_or_create_state(session, category_id)
+        update_irregular_state(state, txn)
+        session.commit()
+        cat = session.get(IrregularCategory, category_id)
+        if cat is not None:
+            avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
+            med = state.median_amount if state.median_amount is not None else 0.0
+            toast(
+                stdscr,
+                f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
+            )
+
     session.close()
 
 

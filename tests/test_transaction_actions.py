@@ -2,7 +2,13 @@ from datetime import datetime
 
 from tests.helpers import get_temp_session, make_prompt
 from budget import cli
-from budget.models import Transaction, Balance
+from budget.models import (
+    Transaction,
+    Balance,
+    IrregularCategory,
+    IrregularRule,
+    IrregularState,
+)
 
 
 def test_transaction_persistence():
@@ -190,4 +196,43 @@ def test_add_transaction_from_list(monkeypatch):
 
         assert called.get("added") is True
     finally:
+        path.unlink()
+
+
+def test_add_transaction_updates_irregular_state(monkeypatch):
+    Session, path = get_temp_session()
+    try:
+        # Seed category and rule that will match the new transaction
+        session = Session()
+        cat = IrregularCategory(name="Groceries")
+        session.add(cat)
+        session.commit()
+        cat_id = cat.id
+        session.add(IrregularRule(category_id=cat_id, pattern="grocer"))
+        session.commit()
+        session.close()
+
+        # Bypass interactive form and capture toast
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+        monkeypatch.setattr(
+            cli,
+            "transaction_form",
+            lambda stdscr, d, t, a: ("Local Grocer", datetime(2023, 4, 2), -20.0),
+        )
+        captured = {}
+
+        def fake_toast(stdscr, msg, ms=900):
+            captured["msg"] = msg
+
+        monkeypatch.setattr(cli, "toast", fake_toast)
+
+        cli.add_transaction(object())
+
+        session = Session()
+        state = session.query(IrregularState).filter_by(category_id=cat_id).one()
+        assert state.last_event_at.date() == datetime(2023, 4, 2).date()
+        assert state.median_amount == 20.0
+        assert "Updated \u2018Groceries\u2019" in captured.get("msg", "")
+    finally:
+        session.close()
         path.unlink()
