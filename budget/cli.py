@@ -73,6 +73,26 @@ def _center_box(stdscr, height: int, width: int) -> "curses.window":
     return win
 
 
+def _refresh(win: "curses.window") -> None:
+    """Refresh ``win`` using ``noutrefresh``/``doupdate`` to reduce flicker."""
+
+    try:
+        win.noutrefresh()
+        curses.doupdate()
+    except AttributeError:
+        # Fallback for dummy windows in tests lacking ``noutrefresh``
+        try:
+            win.refresh()
+        except curses.error:
+            pass
+    except curses.error:
+        # ``doupdate`` may raise if curses isn't fully initialised (e.g. tests)
+        try:
+            win.refresh()
+        except curses.error:
+            pass
+
+
 def text(message, default=None):
     """Prompt the user for free-form text input using a boxed overlay."""
 
@@ -90,7 +110,7 @@ def text(message, default=None):
             win.addnstr(1, 2, prompt, box_width - 4)
         except curses.error:
             pass
-        win.refresh()
+        _refresh(win)
         curses.echo()
         try:
             resp = win.getstr(1, 2 + len(prompt), input_width)
@@ -121,7 +141,7 @@ def confirm(message: str) -> bool:
                 win.addnstr(1 + idx, x, line, max_line)
             except curses.error:
                 pass
-        win.refresh()
+        _refresh(win)
         ch = win.getch()
         return ch in (curses.KEY_ENTER, 10, 13)
 
@@ -756,7 +776,7 @@ def ledger_curses(initial_row, get_prev, get_next, bal_amt):
                 )
             except curses.error:
                 pass
-            stdscr.refresh()
+            _refresh(stdscr)
 
             key = stdscr.getch()
             if key == curses.KEY_UP:
@@ -866,7 +886,7 @@ def scroll_menu(
                     )
                 except curses.error:
                     pass
-                win.refresh()
+                _refresh(win)
                 key = win.getch()
             else:
                 stdscr.erase()
@@ -897,7 +917,7 @@ def scroll_menu(
                     )
                 except curses.error:
                     pass
-                stdscr.refresh()
+                _refresh(stdscr)
                 key = stdscr.getch()
 
             if key == curses.KEY_UP and index > 0:
@@ -1003,7 +1023,7 @@ def goals_curses(entries, index, header=None, footer_right=""):
                 )
             except curses.error:
                 pass
-            stdscr.refresh()
+            _refresh(stdscr)
 
             key = stdscr.getch()
             if key == curses.KEY_UP and index > 0:
