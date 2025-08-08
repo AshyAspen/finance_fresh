@@ -157,3 +157,22 @@ class IrregularState(Base):
     __table_args__ = (
         Index("ix_irregular_state_category_id", "category_id", unique=True),
     )
+
+
+class IrregularRule(Base):
+    """Simple substring rule for mapping transactions to irregular categories."""
+
+    __tablename__ = "irregular_rules"
+
+    id = Column(Integer, primary_key=True)
+    category_id = Column(
+        Integer, ForeignKey("irregular_categories.id"), nullable=False, index=True
+    )
+    pattern = Column(String, nullable=False)
+    active = Column(Boolean, default=True)
+
+    category = relationship("IrregularCategory", backref="rules")
+
+    __table_args__ = (
+        Index("ix_irregular_rules_category_pattern", "category_id", "pattern"),
+    )

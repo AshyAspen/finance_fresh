@@ -27,6 +27,7 @@ def init_db() -> None:
         "goals",
         "irregular_categories",
         "irregular_state",
+        "irregular_rules",
     }
     existing = set(insp.get_table_names())
     if not required.issubset(existing):
@@ -185,5 +186,29 @@ def init_db() -> None:
         conn.execute(
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_irregular_state_category_id ON irregular_state(category_id)"
+            )
+        )
+
+        # Ensure irregular rules columns and indexes
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(irregular_rules)"))]
+        if "category_id" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_rules ADD COLUMN category_id INTEGER REFERENCES irregular_categories(id)"
+                )
+            )
+        if "pattern" not in cols:
+            conn.execute(
+                text("ALTER TABLE irregular_rules ADD COLUMN pattern TEXT")
+            )
+        if "active" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE irregular_rules ADD COLUMN active BOOLEAN DEFAULT 1"
+                )
+            )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_irregular_rules_category_pattern ON irregular_rules(category_id, pattern)"
             )
         )
