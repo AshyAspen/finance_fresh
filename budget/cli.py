@@ -10,8 +10,15 @@ from curses import panel
 from contextlib import contextmanager
 
 from .database import SessionLocal, init_db
-from .models import Transaction, Balance, Recurring, Goal
-from .services_irregular import irregular_daily_series
+from .models import (
+    Transaction,
+    Balance,
+    Recurring,
+    Goal,
+    IrregularCategory,
+    IrregularRule,
+)
+from .services_irregular import irregular_daily_series, learn_irregular_state, categories
 
 FREQUENCIES = [
     "weekly",
@@ -1148,6 +1155,307 @@ def ledger_view(stdscr) -> None:
     ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt)
 
 
+def irregular_category_form(
+    stdscr, name: str, window_days: int, alpha: float, safety_q: float, active: bool
+):
+    """Prompt for irregular category fields and return updated values."""
+
+    name_new = text(stdscr, "Name", default=name)
+    if name_new is None:
+        return None
+    win_str = text(stdscr, "Window days", default=str(window_days))
+    if win_str is None:
+        return None
+    alpha_str = text(stdscr, "Alpha", default=str(alpha))
+    if alpha_str is None:
+        return None
+    safety_str = text(stdscr, "Safety quantile", default=str(safety_q))
+    if safety_str is None:
+        return None
+    active_str = text(stdscr, "Active (Y/N)", default="Y" if active else "N")
+    if active_str is None:
+        return None
+    try:
+        window_days_val = int(win_str)
+        alpha_val = float(alpha_str)
+        safety_val = float(safety_str)
+    except ValueError:
+        return None
+    active_val = active_str.strip().lower() in ("y", "yes", "true", "1")
+    return name_new, window_days_val, alpha_val, safety_val, active_val
+
+
+def edit_irregular_category(
+    stdscr, session, existing: IrregularCategory | None = None
+) -> None:
+    """Add or edit an irregular category."""
+
+    form = irregular_category_form(
+        stdscr,
+        existing.name if existing else "",
+        existing.window_days if existing else 120,
+        existing.alpha if existing else 0.3,
+        existing.safety_quantile if existing else 0.8,
+        existing.active if existing else True,
+    )
+    if form is None:
+        return
+    name, window_days, alpha, safety_q, active = form
+    if existing is None:
+        cat = IrregularCategory(
+            name=name,
+            window_days=window_days,
+            alpha=alpha,
+            safety_quantile=safety_q,
+            active=active,
+        )
+        session.add(cat)
+    else:
+        cat = session.get(IrregularCategory, existing.id)
+        if cat is None:
+            return
+        cat.name = name
+        cat.window_days = window_days
+        cat.alpha = alpha
+        cat.safety_quantile = safety_q
+        cat.active = active
+    session.commit()
+
+
+def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
+    """Manage rules for an irregular category."""
+
+    session = SessionLocal()
+    index = 0
+    with temp_cursor(0), keypad_mode(stdscr):
+        while True:
+            rules = (
+                session.query(IrregularRule)
+                .filter(IrregularRule.category_id == category.id)
+                .order_by(IrregularRule.id)
+                .all()
+            )
+            entries = [r.pattern for r in rules]
+
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            header = f"Rules for {category.name}"
+            offset = 1
+            visible = min(len(entries), h - 1 - offset)
+            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+
+            stdscr.erase()
+            head_x = max(0, (w - len(header)) // 2)
+            try:
+                stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+            except curses.error:
+                pass
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(entries):
+                    break
+                line = entries[line_idx]
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
+
+            footer_l = date.today().isoformat()
+            pos = f"{index + 1}/{len(entries)}" if entries else "0/0"
+            footer_r = f"a:add d:del p:prev {pos}".strip()
+            try:
+                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                stdscr.addnstr(
+                    h - 1,
+                    max(0, w - len(footer_r)),
+                    footer_r,
+                    len(footer_r),
+                )
+            except curses.error:
+                pass
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                curses.resize_term(0, 0)
+                stdscr.clearok(True)
+                continue
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                index += 1
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - visible)
+            elif key == curses.KEY_NPAGE:
+                index = min(len(entries) - 1, index + visible)
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(entries) - 1
+            elif key in (ord("a"), ord("A")):
+                pattern = text(stdscr, "Pattern")
+                if pattern:
+                    session.add(
+                        IrregularRule(category_id=category.id, pattern=pattern, active=True)
+                    )
+                    session.commit()
+            elif key in (ord("d"), ord("D")) and rules:
+                rule = rules[index]
+                if confirm(stdscr, "Delete this rule?"):
+                    session.delete(rule)
+                    session.commit()
+                    index = max(0, index - 1)
+            elif key in (ord("p"), ord("P")) and rules:
+                pattern = rules[index].pattern
+                end = datetime.utcnow()
+                start = end - timedelta(days=90)
+                txns = (
+                    session.query(Transaction)
+                    .filter(Transaction.timestamp >= start, Transaction.timestamp <= end)
+                    .order_by(Transaction.timestamp.desc())
+                    .all()
+                )
+                matches = [
+                    t.description
+                    for t in txns
+                    if pattern.lower() in t.description.lower()
+                ]
+                if matches:
+                    scroll_menu(
+                        stdscr,
+                        matches,
+                        0,
+                        header=f"Matches for '{pattern}'",
+                        boxed=True,
+                    )
+                else:
+                    toast(stdscr, "No matches")
+            elif key in (ord("q"), ord("Q"), 27):
+                break
+    session.close()
+
+
+def irregular_menu(stdscr) -> None:
+    """Manage irregular spending categories."""
+
+    global IRREG_MODE, IRREG_QUANTILE
+    session = SessionLocal()
+    index = 0
+    with temp_cursor(0), keypad_mode(stdscr):
+        while True:
+            cats = categories(session)
+            name_w = max((len(c.name) for c in cats), default=0)
+            entries = [
+                f"{c.name:<{name_w}} | {c.window_days:>3} | {c.alpha:.2f} | {c.safety_quantile:.2f} | {'Y' if c.active else 'N'}"
+                for c in cats
+            ]
+
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            header = "Irregular spending"
+            offset = 1
+            visible = min(len(entries), h - 1 - offset)
+            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+
+            stdscr.erase()
+            head_x = max(0, (w - len(header)) // 2)
+            try:
+                stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+            except curses.error:
+                pass
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(entries):
+                    break
+                line = entries[line_idx]
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
+
+            footer_l = date.today().isoformat()
+            mode_label = (
+                "Deterministic"
+                if IRREG_MODE == "deterministic"
+                else ("MC P50" if IRREG_QUANTILE == "p50" else "MC P80")
+            )
+            pos = f"{index + 1}/{len(entries)}" if entries else "0/0"
+            footer_r = f"{mode_label} {pos}".strip()
+            try:
+                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                stdscr.addnstr(
+                    h - 1,
+                    max(0, w - len(footer_r)),
+                    footer_r,
+                    len(footer_r),
+                )
+            except curses.error:
+                pass
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                curses.resize_term(0, 0)
+                stdscr.clearok(True)
+                continue
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                index += 1
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - visible)
+            elif key == curses.KEY_NPAGE:
+                index = min(len(entries) - 1, index + visible)
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(entries) - 1
+            elif key in (ord("a"), ord("A")):
+                edit_irregular_category(stdscr, session, None)
+                session.close()
+                session = SessionLocal()
+            elif key in (ord("e"), ord("E")) and cats:
+                edit_irregular_category(stdscr, session, cats[index])
+                session.close()
+                session = SessionLocal()
+            elif key in (ord("r"), ord("R")) and cats:
+                irregular_rules_menu(stdscr, cats[index])
+            elif key in (ord("l"), ord("L")) and cats:
+                days_str = text(stdscr, "Days to look back", default="120")
+                if days_str is not None:
+                    try:
+                        days = int(days_str)
+                    except ValueError:
+                        days = 0
+                    if days > 0:
+                        end = date.today()
+                        start = end - timedelta(days=days)
+                        state = learn_irregular_state(session, cats[index].id, start, end)
+                        avg = state.avg_gap_days or 0.0
+                        med = state.median_amount or 0.0
+                        toast(stdscr, f"{avg:.1f}d gap, {med:.2f} amt")
+                        session.close()
+                        session = SessionLocal()
+            elif key in (ord("t"), ord("T")):
+                if IRREG_MODE == "deterministic":
+                    IRREG_MODE = "monte_carlo"
+                    IRREG_QUANTILE = "p50"
+                elif IRREG_QUANTILE == "p50":
+                    IRREG_QUANTILE = "p80"
+                else:
+                    IRREG_MODE = "deterministic"
+                    IRREG_QUANTILE = "p80"
+            elif key in (ord("q"), ord("Q"), 27):
+                break
+    session.close()
+
+
 def goals_curses(stdscr, entries, index, header=None, footer_right=""):
     """Display goals list with controls for add, delete, edit, and toggle."""
 
@@ -1284,6 +1592,7 @@ def main(stdscr) -> None:
                     "List transactions",
                     "Edit bills",
                     "Edit income",
+                    "Irregular spending",
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
@@ -1298,6 +1607,8 @@ def main(stdscr) -> None:
                 edit_recurring(stdscr, False)
             elif choice == "Edit income":
                 edit_recurring(stdscr, True)
+            elif choice == "Irregular spending":
+                irregular_menu(stdscr)
             elif choice == "Ledger":
                 ledger_view(stdscr)
             elif choice == "Set balance":
