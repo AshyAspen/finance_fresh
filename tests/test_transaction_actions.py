@@ -140,8 +140,10 @@ def test_delete_transaction(monkeypatch):
         session.commit()
         session.close()
 
+        responses = iter([("delete", 0), None])
+
         def fake_scroll(entries, index, **kwargs):
-            return ("delete", 0)
+            return next(responses)
 
         monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
         monkeypatch.setattr(cli, "SessionLocal", Session)
