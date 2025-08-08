@@ -788,13 +788,14 @@ def ledger_rows(session):
         quantile=IRREG_QUANTILE,
     )
     for d, amt in irr_series:
-        txns.append(
-            Transaction(
-                description="Irregular",
-                amount=-amt,
-                timestamp=datetime.combine(d, datetime.min.time()),
+        if amt:
+            txns.append(
+                Transaction(
+                    description="Irregular",
+                    amount=-amt,
+                    timestamp=datetime.combine(d, datetime.min.time()),
+                )
             )
-        )
     txns.sort(key=lambda t: t.timestamp)
 
     def total_up_to(ts: datetime) -> float:
@@ -845,7 +846,12 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
         desc_w = len(initial_row.description)
         amt_w = len(f"{initial_row.amount:.2f}")
         run_w = len(f"{initial_row.running:.2f}")
-        footer_left = date.today().isoformat()
+        mode_label = (
+            "Deterministic"
+            if IRREG_MODE == "deterministic"
+            else f"MC {IRREG_QUANTILE.upper()}"
+        )
+        footer_left = f"Irregular forecast: {mode_label}"
 
         while True:
             h, w = stdscr.getmaxyx()
@@ -1114,13 +1120,14 @@ def ledger_view(stdscr) -> None:
         quantile=IRREG_QUANTILE,
     )
     for d, amt in irr_series:
-        txns.append(
-            Transaction(
-                description="Irregular",
-                amount=-amt,
-                timestamp=datetime.combine(d, datetime.min.time()),
+        if amt:
+            txns.append(
+                Transaction(
+                    description="Irregular",
+                    amount=-amt,
+                    timestamp=datetime.combine(d, datetime.min.time()),
+                )
             )
-        )
     txns.sort(key=lambda t: t.timestamp)
 
     today = date.today()
