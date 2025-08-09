@@ -5,7 +5,8 @@ import json
 import math
 import random
 
-from budget.models import IrregularCategory
+from budget import cli
+from budget.models import IrregularCategory, Balance
 from budget.services_irregular import forecast_irregular
 
 
@@ -49,3 +50,52 @@ def test_forecast_irregular_monte_carlo():
 
     session.close()
     db_path.unlink()
+
+
+def test_monte_carlo_matches_deterministic(monkeypatch):
+    TestingSession, db_path = helpers.get_temp_session()
+    session = TestingSession()
+    try:
+        session.add(Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)))
+        cat = IrregularCategory(name="Auto")
+        session.add(cat)
+        session.commit()
+        state = cat.state
+        state.avg_gap_days = 5
+        state.median_amount = 100.0
+        state.last_event_at = datetime(2023, 1, 1)
+        state.amount_mu = math.log(100.0)
+        state.amount_sigma = 0.0
+        state.weekday_probs = None
+        session.add(state)
+        session.commit()
+
+        class FakeDate(date):
+            @classmethod
+            def today(cls):
+                return cls(2023, 1, 1)
+
+        monkeypatch.setattr(cli, "date", FakeDate)
+
+        start = date(2023, 1, 1)
+        end = date(2023, 1, 31)
+
+        monkeypatch.setattr(cli, "IRREG_MODE", "deterministic")
+        rows_det = list(cli.ledger_rows(session, start, end))
+
+        import budget.services_irregular as irr
+
+        monkeypatch.setattr(irr.random, "gauss", lambda mu, sigma: mu)
+        monkeypatch.setattr(cli, "IRREG_MODE", "monte_carlo")
+        rows_mc = list(cli.ledger_rows(session, start, end))
+
+        assert [
+            (r.date, r.description, round(r.amount, 2), round(r.running, 2))
+            for r in rows_mc
+        ] == [
+            (r.date, r.description, round(r.amount, 2), round(r.running, 2))
+            for r in rows_det
+        ]
+    finally:
+        session.close()
+        db_path.unlink()
