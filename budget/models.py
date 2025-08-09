@@ -49,11 +49,11 @@ class Transaction(Base):
 
 
 class Balance(Base):
-    """Stores the user's current balance."""
+    """Stores balance snapshots per account."""
 
     __tablename__ = "balance"
 
-    id = Column(Integer, primary_key=True, default=1)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     amount = Column(Float, nullable=False, default=0.0)
     timestamp = Column(DateTime, default=datetime.utcnow)
     account_id = Column(
@@ -62,6 +62,10 @@ class Balance(Base):
         index=True,
         nullable=False,
         default=1,
+    )
+
+    __table_args__ = (
+        Index("ix_balance_account_id_timestamp", "account_id", "timestamp"),
     )
 
 
