@@ -161,6 +161,41 @@ def modal_box(stdscr, height: int, width: int):
             panel.update_panels()
             curses.doupdate()
 
+
+KEY_BINDINGS = [
+    "Up/Down: move selection",
+    "PgUp/PgDn: page",
+    "Home/End: jump to start/end",
+    "Enter: select",
+    "a: add",
+    "d: delete",
+    "e: edit",
+    "p: pattern matches",
+    "r: rules",
+    "l: learn",
+    "t: toggle",
+    "q: quit/back",
+    "k: show this help",
+]
+
+
+def show_key_help(stdscr):
+    """Display a modal listing common key bindings."""
+
+    height = len(KEY_BINDINGS) + 2
+    width = max(len(line) for line in KEY_BINDINGS) + 4
+    with modal_box(stdscr, height, width) as win:
+        for idx, line in enumerate(KEY_BINDINGS, start=1):
+            try:
+                win.addnstr(idx, 2, line, width - 4)
+            except curses.error:
+                pass
+        try:
+            win.refresh()
+        except curses.error:
+            pass
+        win.getch()
+
 def text(stdscr, message, default=None):
     with temp_cursor(1), keypad_mode(stdscr):
         h, w = stdscr.getmaxyx()
@@ -197,19 +232,23 @@ def confirm(stdscr, message: str) -> bool:
     max_line = max(len(line) for line in lines)
 
     with temp_cursor(0), keypad_mode(stdscr):
-        with modal_box(stdscr, len(lines) + 2, max_line + 4) as win:
-            for idx, line in enumerate(lines):
-                x = (max_line - len(line)) // 2 + 2
+        while True:
+            with modal_box(stdscr, len(lines) + 2, max_line + 4) as win:
+                for idx, line in enumerate(lines):
+                    x = (max_line - len(line)) // 2 + 2
+                    try:
+                        win.addnstr(1 + idx, x, line, max_line)
+                    except curses.error:
+                        pass
                 try:
-                    win.addnstr(1 + idx, x, line, max_line)
+                    win.refresh()
                 except curses.error:
                     pass
-            try:
-                win.refresh()
-            except curses.error:
-                pass
-            ch = win.getch()
-    return ch in (curses.KEY_ENTER, 10, 13)
+                ch = win.getch()
+            if ch == ord("k"):
+                show_key_help(stdscr)
+                continue
+            return ch in (curses.KEY_ENTER, 10, 13)
 
 
 def toast(stdscr, msg: str, ms: int = 900):
@@ -1077,6 +1116,8 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                     else f"MC {IRREG_QUANTILE.upper()}"
                 )
                 footer_left = f"Irregular forecast: {mode_label}"
+            elif key == ord("k"):
+                show_key_help(stdscr)
             elif key == ord("q"):
                 break
 
@@ -1216,6 +1257,8 @@ def scroll_menu(
                 return -1
             elif key == ord("d") and allow_delete:
                 return ("delete", index)
+            elif key == ord("k"):
+                show_key_help(stdscr)
             elif key == ord("q"):
                 return None
 
@@ -1463,6 +1506,8 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
                     )
                 else:
                     toast(stdscr, "No matches")
+            elif key == ord("k"):
+                show_key_help(stdscr)
             elif key in (ord("q"), ord("Q"), 27):
                 break
     session.close()
@@ -1581,6 +1626,8 @@ def irregular_menu(stdscr) -> None:
                 else:
                     IRREG_MODE = "deterministic"
                     IRREG_QUANTILE = "p80"
+            elif key == ord("k"):
+                show_key_help(stdscr)
             elif key in (ord("q"), ord("Q"), 27):
                 break
     session.close()
@@ -1657,6 +1704,8 @@ def goals_curses(stdscr, entries, index, header=None, footer_right=""):
                 return "delete", index
             elif key == ord("t") and entries:
                 return "toggle", index
+            elif key == ord("k"):
+                show_key_help(stdscr)
             elif key == ord("q"):
                 return "quit", None
 

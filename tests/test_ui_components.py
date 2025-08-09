@@ -297,3 +297,80 @@ def test_main_menu_not_boxed(monkeypatch):
     cli.main(FakeStdScr())
 
     assert captured.get("boxed") is False
+
+
+def test_scroll_menu_help_popup(monkeypatch):
+    called = []
+
+    def fake_help(win):
+        called.append(True)
+
+    monkeypatch.setattr(cli, "show_key_help", fake_help)
+
+    class FakeWin:
+        def __init__(self):
+            self.calls = []
+            self.keys = [ord("k"), ord("q")]
+
+        def getmaxyx(self):
+            return (24, 80)
+
+        def addnstr(self, *args, **kwargs):
+            pass
+
+        def addstr(self, *args, **kwargs):
+            pass
+
+        def erase(self):
+            pass
+
+        def refresh(self):
+            pass
+
+        def keypad(self, flag):
+            pass
+
+        def getch(self):
+            return self.keys.pop(0)
+
+        def box(self):
+            pass
+
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+
+    index = cli.scroll_menu(FakeWin(), ["A"], 0)
+    assert index is None
+    assert called == [True]
+
+
+def test_goals_curses_help_popup(monkeypatch):
+    called = []
+
+    monkeypatch.setattr(cli, "show_key_help", lambda win: called.append(True))
+    monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
+
+    class FakeStdScr:
+        def __init__(self):
+            self.keys = [ord("k"), ord("q")]
+
+        def getmaxyx(self):
+            return (24, 80)
+
+        def erase(self):
+            pass
+
+        def addnstr(self, *args, **kwargs):
+            pass
+
+        def refresh(self):
+            pass
+
+        def keypad(self, flag):
+            pass
+
+        def getch(self):
+            return self.keys.pop(0)
+
+    action, idx = cli.goals_curses(FakeStdScr(), ["row"], 0)
+    assert action == "quit" and idx is None
+    assert called == [True]
