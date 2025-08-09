@@ -39,10 +39,6 @@ FREQUENCIES = [
     "annually",
 ]
 
-# planning horizon configuration
-PLAN_PAST_BUFFER_DAYS = 30
-PLAN_FUTURE_DAYS = 365
-
 # irregular forecast mode stored for session
 IRREG_MODE = "monte_carlo"
 IRREG_QUANTILE = "p80"
@@ -811,9 +807,10 @@ def ledger_rows(session):
     bal_amt = bal.amount if bal else 0.0
     bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
 
-    # Define a fixed planning horizon
-    plan_start = min(date.today(), bal_ts.date()) - timedelta(days=PLAN_PAST_BUFFER_DAYS)
-    plan_end = date.today() + timedelta(days=PLAN_FUTURE_DAYS)
+    earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
+    earliest_date = earliest_tx.timestamp.date() if earliest_tx else bal_ts.date()
+    plan_start = min(earliest_date, bal_ts.date())
+    plan_end = date.today() + timedelta(days=3650)  # ~10 years
 
     # real transactions
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
