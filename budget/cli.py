@@ -139,11 +139,11 @@ def list_accounts(session):
     )
 
 
-def pick_account(stdscr, session, prompt="Select account"):
+def pick_account(stdscr, session, prompt="Select account", default=None):
     accts = list_accounts(session)
     if not accts:
         return None
-    choice = select(stdscr, prompt, [(a.name, a) for a in accts])
+    choice = select(stdscr, prompt, [(a.name, a) for a in accts], default=default)
     return choice
 
 
@@ -577,22 +577,38 @@ def add_recurring(stdscr, is_income: bool, existing: Recurring | None = None) ->
         return
     amount = abs(amount) if is_income else -abs(amount)
     session = SessionLocal()
-    if existing is None:
-        rec = Recurring(
-            description=name, amount=amount, start_date=start, frequency=freq
-        )
-        session.add(rec)
-    else:
-        rec = session.get(Recurring, existing.id)
-        if rec is None:
-            session.close()
+    try:
+        if existing is not None:
+            default_acct = session.get(Account, existing.account_id)
+        elif CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+            default_acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+        else:
+            default_acct = None
+        acct = pick_account(stdscr, session, "Account", default=default_acct)
+        if acct is None:
             return
-        rec.description = name
-        rec.amount = amount
-        rec.start_date = start
-        rec.frequency = freq
-    session.commit()
-    session.close()
+        account_id = acct.id
+        if existing is None:
+            rec = Recurring(
+                description=name,
+                amount=amount,
+                start_date=start,
+                frequency=freq,
+                account_id=account_id,
+            )
+            session.add(rec)
+        else:
+            rec = session.get(Recurring, existing.id)
+            if rec is None:
+                return
+            rec.description = name
+            rec.amount = amount
+            rec.start_date = start
+            rec.frequency = freq
+            rec.account_id = account_id
+        session.commit()
+    finally:
+        session.close()
 
 
 def goal_form(
