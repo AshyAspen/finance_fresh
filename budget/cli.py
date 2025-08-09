@@ -1228,8 +1228,8 @@ def ledger_view(stdscr) -> None:
         return
 
     ts_list = [r.timestamp for r in rows]
-    today_dt = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
-    start_idx = bisect_right(ts_list, today_dt) - 1
+    today_date = date.today()
+    start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
     if start_idx < 0:
         start_idx = 0
     initial_row = rows[start_idx]
