@@ -817,16 +817,17 @@ def ledger_rows(session):
 
     # irregular forecast within planning window
     irr_start = max(date.today(), bal_ts.date())
-    irr_series = irregular_daily_series(
+    irr_forecast = irregular_daily_series(
         session,
         irr_start,
         plan_end,
         mode=IRREG_MODE,
         quantile=IRREG_QUANTILE,
     )
-    for d, amt in irr_series:
+    irr_series: list[Transaction] = []
+    for d, amt in irr_forecast:
         if amt:
-            txns.append(
+            irr_series.append(
                 Transaction(
                     description="Irregular",
                     amount=-amt,
@@ -837,7 +838,7 @@ def ledger_rows(session):
     # synthetic recurring transactions across horizon
     recs = session.query(Recurring).all()
     synthetic_txns: list[Transaction] = []
-    for idx, r in enumerate(recs):
+    for r in recs:
         anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
         occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
         for occ in occs:
@@ -845,13 +846,31 @@ def ledger_rows(session):
                 Transaction(
                     description=r.description,
                     amount=r.amount,
-                    timestamp=datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=idx),
+                    timestamp=datetime.combine(occ, datetime.min.time()),
                     account_id=r.account_id,
                 )
             )
 
+    txns.extend(irr_series)
     txns.extend(synthetic_txns)
-    txns.sort(key=lambda t: t.timestamp)
+
+    for t in synthetic_txns:
+        setattr(t, "_source_type", "recurring")
+    for t in irr_series:
+        setattr(t, "_source_type", "irregular")
+
+    def classify_priority(t):
+        src = getattr(t, "_source_type", "posted")  # posted|recurring|irregular
+        amt = t.amount or 0.0
+        if src == "irregular":
+            return (50, 0)
+        if src == "recurring":
+            return (20, 0) if amt > 0 else (30, 0)
+        return (20, 0) if amt > 0 else (40, 0)
+
+    txns.sort(key=lambda t: (t.timestamp.date(), classify_priority(t)[0], classify_priority(t)[1], t.timestamp))
+    for idx, t in enumerate(txns):
+        t.timestamp = t.timestamp + timedelta(microseconds=idx)
 
     # compute offset so running balance matches stored balance at bal_ts
     total_before = 0.0
