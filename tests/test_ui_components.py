@@ -302,8 +302,8 @@ def test_main_menu_not_boxed(monkeypatch):
 def test_scroll_menu_help_popup(monkeypatch):
     called = []
 
-    def fake_help(win):
-        called.append(True)
+    def fake_help(win, bindings):
+        called.append(bindings)
 
     monkeypatch.setattr(cli, "show_key_help", fake_help)
 
@@ -340,13 +340,24 @@ def test_scroll_menu_help_popup(monkeypatch):
 
     index = cli.scroll_menu(FakeWin(), ["A"], 0)
     assert index is None
-    assert called == [True]
+    assert called == [
+        [
+            "Up/Down: move selection",
+            "PgUp/PgDn: page",
+            "Home/End: jump to start/end",
+            "Enter: select",
+            "q: quit/back",
+        ]
+    ]
 
 
 def test_goals_curses_help_popup(monkeypatch):
     called = []
 
-    monkeypatch.setattr(cli, "show_key_help", lambda win: called.append(True))
+    def fake_help(win, bindings):
+        called.append(bindings)
+
+    monkeypatch.setattr(cli, "show_key_help", fake_help)
     monkeypatch.setattr(cli.curses, "curs_set", lambda n: None)
 
     class FakeStdScr:
@@ -373,4 +384,15 @@ def test_goals_curses_help_popup(monkeypatch):
 
     action, idx = cli.goals_curses(FakeStdScr(), ["row"], 0)
     assert action == "quit" and idx is None
-    assert called == [True]
+    assert called == [
+        [
+            "Up/Down: move selection",
+            "PgUp/PgDn: page",
+            "Home/End: jump to start/end",
+            "Enter: edit",
+            "a: add",
+            "d: delete",
+            "t: toggle",
+            "q: quit/back",
+        ]
+    ]

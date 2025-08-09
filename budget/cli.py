@@ -162,30 +162,16 @@ def modal_box(stdscr, height: int, width: int):
             curses.doupdate()
 
 
-KEY_BINDINGS = [
-    "Up/Down: move selection",
-    "PgUp/PgDn: page",
-    "Home/End: jump to start/end",
-    "Enter: select",
-    "a: add",
-    "d: delete",
-    "e: edit",
-    "p: pattern matches",
-    "r: rules",
-    "l: learn",
-    "t: toggle",
-    "q: quit/back",
-    "k: show this help",
-]
+def show_key_help(stdscr, bindings):
+    """Display a modal listing the provided key bindings."""
 
-
-def show_key_help(stdscr):
-    """Display a modal listing common key bindings."""
-
-    height = len(KEY_BINDINGS) + 2
-    width = max(len(line) for line in KEY_BINDINGS) + 4
+    lines = list(bindings)
+    if "k: show this help" not in lines:
+        lines.append("k: show this help")
+    height = len(lines) + 2
+    width = max(len(line) for line in lines) + 4
     with modal_box(stdscr, height, width) as win:
-        for idx, line in enumerate(KEY_BINDINGS, start=1):
+        for idx, line in enumerate(lines, start=1):
             try:
                 win.addnstr(idx, 2, line, width - 4)
             except curses.error:
@@ -246,7 +232,7 @@ def confirm(stdscr, message: str) -> bool:
                     pass
                 ch = win.getch()
             if ch == ord("k"):
-                show_key_help(stdscr)
+                show_key_help(stdscr, ["Enter: confirm", "any other key: cancel"])
                 continue
             return ch in (curses.KEY_ENTER, 10, 13)
 
@@ -1117,7 +1103,16 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 )
                 footer_left = f"Irregular forecast: {mode_label}"
             elif key == ord("k"):
-                show_key_help(stdscr)
+                show_key_help(
+                    stdscr,
+                    [
+                        "Up/Down: move",
+                        "PgUp/PgDn: page",
+                        "Home/End: jump to start/end",
+                        "t: toggle forecast mode",
+                        "q: quit/back",
+                    ],
+                )
             elif key == ord("q"):
                 break
 
@@ -1258,7 +1253,18 @@ def scroll_menu(
             elif key == ord("d") and allow_delete:
                 return ("delete", index)
             elif key == ord("k"):
-                show_key_help(stdscr)
+                bindings = [
+                    "Up/Down: move selection",
+                    "PgUp/PgDn: page",
+                    "Home/End: jump to start/end",
+                    "Enter: select",
+                ]
+                if allow_add:
+                    bindings.append("a: add")
+                if allow_delete:
+                    bindings.append("d: delete")
+                bindings.append("q: quit/back")
+                show_key_help(stdscr, bindings)
             elif key == ord("q"):
                 return None
 
@@ -1507,7 +1513,18 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
                 else:
                     toast(stdscr, "No matches")
             elif key == ord("k"):
-                show_key_help(stdscr)
+                show_key_help(
+                    stdscr,
+                    [
+                        "Up/Down: move selection",
+                        "PgUp/PgDn: page",
+                        "Home/End: jump to start/end",
+                        "a: add",
+                        "d: delete",
+                        "p: pattern matches",
+                        "q: quit/back",
+                    ],
+                )
             elif key in (ord("q"), ord("Q"), 27):
                 break
     session.close()
@@ -1627,7 +1644,20 @@ def irregular_menu(stdscr) -> None:
                     IRREG_MODE = "deterministic"
                     IRREG_QUANTILE = "p80"
             elif key == ord("k"):
-                show_key_help(stdscr)
+                show_key_help(
+                    stdscr,
+                    [
+                        "Up/Down: move selection",
+                        "PgUp/PgDn: page",
+                        "Home/End: jump to start/end",
+                        "a: add",
+                        "e: edit",
+                        "r: rules",
+                        "l: learn",
+                        "t: toggle forecast mode",
+                        "q: quit/back",
+                    ],
+                )
             elif key in (ord("q"), ord("Q"), 27):
                 break
     session.close()
@@ -1705,7 +1735,19 @@ def goals_curses(stdscr, entries, index, header=None, footer_right=""):
             elif key == ord("t") and entries:
                 return "toggle", index
             elif key == ord("k"):
-                show_key_help(stdscr)
+                show_key_help(
+                    stdscr,
+                    [
+                        "Up/Down: move selection",
+                        "PgUp/PgDn: page",
+                        "Home/End: jump to start/end",
+                        "Enter: edit",
+                        "a: add",
+                        "d: delete",
+                        "t: toggle",
+                        "q: quit/back",
+                    ],
+                )
             elif key == ord("q"):
                 return "quit", None
 
