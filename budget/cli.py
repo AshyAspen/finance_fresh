@@ -373,6 +373,20 @@ def add_transfer(stdscr) -> None:
     session.close()
 
 
+def choose_account_scope(stdscr, current: list[int]) -> list[int] | None:
+    session = SessionLocal()
+    accounts = (
+        session.query(Account)
+        .filter(Account.archived == False)
+        .order_by(Account.name)
+        .all()
+    )
+    session.close()
+    all_ids = [a.id for a in accounts]
+    choices = [("All accounts", all_ids)] + [(a.name, [a.id]) for a in accounts]
+    return select(stdscr, "Accounts", choices, default=current)
+
+
 def add_recurring(stdscr, is_income: bool, existing: Recurring | None = None) -> None:
     """Prompt user to add or edit a recurring bill or income."""
 
@@ -1075,7 +1089,9 @@ def ledger_rows(
         )
 
 
-def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+def ledger_curses(
+    stdscr, initial_row, get_prev, get_next, bal_amt, account_names, multi
+):
     global IRREG_MODE, IRREG_QUANTILE
     rows = [initial_row]
     index = 0
@@ -1083,7 +1099,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
     with temp_cursor(0), keypad_mode(stdscr):
         desc_w = len(initial_row.description)
         amt_w = len(f"{initial_row.amount:.2f}")
-        run_w = len(f"{initial_row.running:.2f}")
+        run_w = len(f"{initial_row.running_account:.2f}")
+        acct_w = max(len(n) for n in account_names.values()) if multi else 0
+        tot_w = len(f"{initial_row.running_total:.2f}") if multi else 0
         mode_label = (
             "Deterministic"
             if IRREG_MODE == "deterministic"
@@ -1104,7 +1122,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 rows.insert(0, prev_row)
                 desc_w = max(desc_w, len(prev_row.description))
                 amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-                run_w = max(run_w, len(f"{prev_row.running:.2f}"))
+                run_w = max(run_w, len(f"{prev_row.running_account:.2f}"))
+                if multi:
+                    tot_w = max(tot_w, len(f"{prev_row.running_total:.2f}"))
                 index += 1
 
             while len(rows) < visible:
@@ -1114,7 +1134,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 rows.append(next_row)
                 desc_w = max(desc_w, len(next_row.description))
                 amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-                run_w = max(run_w, len(f"{next_row.running:.2f}"))
+                run_w = max(run_w, len(f"{next_row.running_account:.2f}"))
+                if multi:
+                    tot_w = max(tot_w, len(f"{next_row.running_total:.2f}"))
 
             top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
 
@@ -1124,11 +1146,22 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 if line_idx >= len(rows):
                     break
                 r = rows[line_idx]
-                line = (
-                    f"{r.date.strftime('%Y-%m-%d')} | "
-                    f"{r.description:<{desc_w}} | "
-                    f"{r.amount:>{amt_w}.2f} | {r.running:>{run_w}.2f}"
-                )
+                if multi:
+                    acct = account_names.get(r.account_id, str(r.account_id))
+                    line = (
+                        f"{r.date.strftime('%Y-%m-%d')} | "
+                        f"{acct:<{acct_w}} | "
+                        f"{r.description:<{desc_w}} | "
+                        f"{r.amount:>{amt_w}.2f} | "
+                        f"{r.running_account:>{run_w}.2f} | "
+                        f"{r.running_total:>{tot_w}.2f}"
+                    )
+                else:
+                    line = (
+                        f"{r.date.strftime('%Y-%m-%d')} | "
+                        f"{r.description:<{desc_w}} | "
+                        f"{r.amount:>{amt_w}.2f} | {r.running_account:>{run_w}.2f}"
+                    )
                 attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
                 try:
                     stdscr.addnstr(i, 0, line, w - 1, attr)
@@ -1164,7 +1197,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                         rows.insert(0, prev_row)
                         desc_w = max(desc_w, len(prev_row.description))
                         amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-                        run_w = max(run_w, len(f"{prev_row.running:.2f}"))
+                        run_w = max(run_w, len(f"{prev_row.running_account:.2f}"))
+                        if multi:
+                            tot_w = max(tot_w, len(f"{prev_row.running_total:.2f}"))
             elif key == curses.KEY_DOWN:
                 if index < len(rows) - 1:
                     index += 1
@@ -1174,7 +1209,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                         rows.append(next_row)
                         desc_w = max(desc_w, len(next_row.description))
                         amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-                        run_w = max(run_w, len(f"{next_row.running:.2f}"))
+                        run_w = max(run_w, len(f"{next_row.running_account:.2f}"))
+                        if multi:
+                            tot_w = max(tot_w, len(f"{next_row.running_total:.2f}"))
                         index += 1
             elif key == curses.KEY_PPAGE:
                 index = max(0, index - visible)
@@ -1200,7 +1237,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                     index = 0
                     desc_w = len(new_row.description)
                     amt_w = len(f"{new_row.amount:.2f}")
-                    run_w = len(f"{new_row.running:.2f}")
+                    run_w = len(f"{new_row.running_account:.2f}")
+                    if multi:
+                        tot_w = len(f"{new_row.running_total:.2f}")
                 mode_label = (
                     "Deterministic"
                     if IRREG_MODE == "deterministic"
@@ -1380,28 +1419,34 @@ def scroll_menu(
                 return None
 
 
-def ledger_view(stdscr) -> None:
+def ledger_view(stdscr, account_scope: list[int] | None = None) -> None:
     """Display a scrollable ledger as ``date | name | amount | balance``."""
     session = SessionLocal()
     default_acc = ensure_default_account(session)
-    bal = (
-        session.query(Balance)
-        .filter(Balance.account_id == default_acc.id)
-        .order_by(Balance.timestamp.desc())
-        .first()
-    )
-    bal_amt = bal.amount if bal else 0.0
+    if account_scope is None:
+        account_scope = [default_acc.id]
+    accounts = session.query(Account).filter(Account.id.in_(account_scope)).all()
+    bal_amt = 0.0
+    for aid in account_scope:
+        bal = (
+            session.query(Balance)
+            .filter(Balance.account_id == aid)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
+        if bal:
+            bal_amt += bal.amount
 
     earliest_tx = (
         session.query(Transaction)
-        .filter(Transaction.account_id == default_acc.id)
+        .filter(Transaction.account_id.in_(account_scope))
         .order_by(Transaction.timestamp)
         .first()
     )
     earliest_date = earliest_tx.timestamp.date() if earliest_tx else date.today()
     plan_start = earliest_date
     plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
-    account_scope = [default_acc.id]
+    account_names = {a.id: a.name for a in accounts}
 
     rows = list(ledger_rows(session, plan_start, plan_end, account_scope))
     if not rows:
@@ -1451,7 +1496,15 @@ def ledger_view(stdscr) -> None:
         return None
 
     get_prev.refresh = refresh  # type: ignore[attr-defined]
-    ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt)
+    ledger_curses(
+        stdscr,
+        initial_row,
+        get_prev,
+        get_next,
+        bal_amt,
+        account_names,
+        len(account_scope) > 1,
+    )
     session.close()
 
 
@@ -1935,11 +1988,12 @@ def main(stdscr) -> None:
         session = SessionLocal()
         try:
             try:
-                ensure_default_account(session)
+                default_acc_id = ensure_default_account(session).id
             except OperationalError:
-                pass
+                default_acc_id = 1
         finally:
             session.close()
+        account_scope = [default_acc_id]
         while True:
             choice = select(
                 stdscr,
@@ -1950,6 +2004,7 @@ def main(stdscr) -> None:
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
+                    "Accounts",
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
@@ -1968,8 +2023,12 @@ def main(stdscr) -> None:
                 edit_recurring(stdscr, True)
             elif choice == "Irregular spending":
                 irregular_menu(stdscr)
+            elif choice == "Accounts":
+                new_scope = choose_account_scope(stdscr, account_scope)
+                if new_scope is not None:
+                    account_scope = new_scope
             elif choice == "Ledger":
-                ledger_view(stdscr)
+                ledger_view(stdscr, account_scope)
             elif choice == "Set balance":
                 set_balance(stdscr)
             elif choice == "Wants/Goals":

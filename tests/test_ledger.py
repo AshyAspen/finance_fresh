@@ -207,7 +207,7 @@ def test_ledger_view_displays_all_events(monkeypatch):
 
         captured = {}
 
-        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt, *args, **kwargs):
             rows = [initial_row]
             while True:
                 prev_row = get_prev(rows[0].timestamp)
@@ -442,7 +442,7 @@ def test_ledger_view_handles_multiple_recurring(monkeypatch):
 
         captured = {}
 
-        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt, *args, **kwargs):
             rows = [initial_row]
             prev_row = get_prev(rows[0].timestamp)
             if prev_row is not None:
