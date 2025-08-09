@@ -1247,8 +1247,10 @@ def ledger_view(stdscr) -> None:
 
     def refresh(ts_current: datetime):
         rebuild()
-        ts_clean = ts_current.replace(microsecond=0)
-        idx = bisect_right(ts_list, ts_clean) - 1
+        target_date = ts_current.date()
+        # Use a date list for bisection to avoid microsecond bump issues
+        date_list = [r.timestamp.date() for r in rows]
+        idx = bisect_right(date_list, target_date) - 1
         if idx < 0:
             idx = 0
         return rows[idx]
