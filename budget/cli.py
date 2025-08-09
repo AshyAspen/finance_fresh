@@ -833,7 +833,24 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
     # real transactions
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
 
-    # irregular forecast within planning window
+    # synthetic recurring transactions across horizon (base set)
+    recs = session.query(Recurring).all()
+    synthetic_txns: list[Transaction] = []
+    for r in recs:
+        anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+        occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
+        for occ in occs:
+            synthetic_txns.append(
+                Transaction(
+                    description=r.description,
+                    amount=r.amount,
+                    timestamp=datetime.combine(occ, datetime.min.time()),
+                    account_id=r.account_id,
+                )
+            )
+    txns.extend(synthetic_txns)
+
+    # irregular forecast within planning window (appended after base set)
     irr_start = max(date.today(), bal_ts.date())
     irr_forecast = irregular_daily_series(
         session,
@@ -852,25 +869,7 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
                     timestamp=datetime.combine(d, datetime.min.time()),
                 )
             )
-
-    # synthetic recurring transactions across horizon
-    recs = session.query(Recurring).all()
-    synthetic_txns: list[Transaction] = []
-    for r in recs:
-        anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
-        occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
-        for occ in occs:
-            synthetic_txns.append(
-                Transaction(
-                    description=r.description,
-                    amount=r.amount,
-                    timestamp=datetime.combine(occ, datetime.min.time()),
-                    account_id=r.account_id,
-                )
-            )
-
     txns.extend(irr_series)
-    txns.extend(synthetic_txns)
 
     for t in synthetic_txns:
         setattr(t, "_source_type", "recurring")
@@ -906,6 +905,7 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
 
 
 def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+    global IRREG_MODE, IRREG_QUANTILE
     rows = [initial_row]
     index = 0
 
@@ -1025,6 +1025,29 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 index = 0
             elif key == curses.KEY_END:
                 index = len(rows) - 1
+            elif key in (ord("t"), ord("T")):
+                if IRREG_MODE == "deterministic":
+                    IRREG_MODE = "monte_carlo"
+                    IRREG_QUANTILE = "p50"
+                elif IRREG_QUANTILE == "p50":
+                    IRREG_QUANTILE = "p80"
+                else:
+                    IRREG_MODE = "deterministic"
+                    IRREG_QUANTILE = "p80"
+                current_ts = rows[index].timestamp
+                if hasattr(get_prev, "refresh"):
+                    new_row = get_prev.refresh(current_ts)
+                    rows = [new_row]
+                    index = 0
+                    desc_w = len(new_row.description)
+                    amt_w = len(f"{new_row.amount:.2f}")
+                    run_w = len(f"{new_row.running:.2f}")
+                mode_label = (
+                    "Deterministic"
+                    if IRREG_MODE == "deterministic"
+                    else f"MC {IRREG_QUANTILE.upper()}"
+                )
+                footer_left = f"Irregular forecast: {mode_label}"
             elif key == ord("q"):
                 break
 
@@ -1196,6 +1219,14 @@ def ledger_view(stdscr) -> None:
         rows = list(ledger_rows(session, plan_start, plan_end))
         ts_list = [r.timestamp for r in rows]
 
+    def refresh(ts_current: datetime):
+        rebuild()
+        ts_clean = ts_current.replace(microsecond=0)
+        idx = bisect_right(ts_list, ts_clean) - 1
+        if idx < 0:
+            idx = 0
+        return rows[idx]
+
     def get_prev(ts_before):
         nonlocal plan_start
         if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
@@ -1218,6 +1249,7 @@ def ledger_view(stdscr) -> None:
             return r.timestamp, r.description, r.amount
         return None
 
+    get_prev.refresh = refresh  # type: ignore[attr-defined]
     ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt)
     session.close()
 
