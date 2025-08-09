@@ -15,6 +15,26 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 Base = declarative_base()
 
+
+def ensure_default_account(session) -> "Account":
+    """Ensure a 'Default Checking' account exists and return it."""
+    from .models import Account
+
+    acc = session.query(Account).filter_by(name="Default Checking").first()
+    if acc:
+        return acc
+
+    legacy = session.query(Account).filter_by(name="Default").first()
+    if legacy:
+        legacy.name = "Default Checking"
+        session.commit()
+        return legacy
+
+    acc = Account(name="Default Checking", type="checking")
+    session.add(acc)
+    session.commit()
+    return acc
+
 def init_db() -> None:
     """Create database tables if they do not exist."""
     from . import models  # noqa: F401
@@ -34,20 +54,11 @@ def init_db() -> None:
         Base.metadata.create_all(engine)
         existing = set(insp.get_table_names())
 
-    with engine.begin() as conn:
-        # Ensure default account exists and capture its id
-        res = conn.execute(text("SELECT id FROM accounts WHERE name='Default'"))
-        row = res.fetchone()
-        if row is None:
-            conn.execute(
-                text(
-                    "INSERT INTO accounts (id, name, type) VALUES (1, 'Default', 'checking')"
-                )
-            )
-            default_id = 1
-        else:
-            default_id = row[0]
+    SessionLocal.configure(bind=engine)
+    with SessionLocal() as session:
+        default_id = ensure_default_account(session).id
 
+    with engine.begin() as conn:
         # Ensure account_id columns exist and backfill
         for table in ["transactions", "balance", "recurring", "goals"]:
             cols = [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))]
@@ -82,6 +93,19 @@ def init_db() -> None:
                         f"CREATE INDEX IF NOT EXISTS ix_{table}_account_id_timestamp ON {table}(account_id, timestamp)"
                     )
                 )
+        # If a legacy balance row exists, duplicate it for the default account
+        res = conn.execute(
+            text("SELECT COUNT(*) FROM balance WHERE account_id = :acc"),
+            {"acc": default_id},
+        )
+        if res.scalar() == 1:
+            conn.execute(
+                text(
+                    "INSERT INTO balance (amount, timestamp, account_id) "
+                    "SELECT amount, timestamp, account_id FROM balance WHERE account_id = :acc"
+                ),
+                {"acc": default_id},
+            )
 
         # Ensure irregular category columns and indexes
         cols = [r[1] for r in conn.execute(text("PRAGMA table_info(irregular_categories)"))]

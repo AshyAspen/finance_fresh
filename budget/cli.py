@@ -9,7 +9,8 @@ from bisect import bisect_left, bisect_right
 from curses import panel
 from contextlib import contextmanager
 
-from .database import SessionLocal, init_db
+from .database import SessionLocal, init_db, ensure_default_account
+from sqlalchemy.exc import OperationalError
 from .models import (
     Transaction,
     Balance,
@@ -1805,6 +1806,14 @@ def main(stdscr) -> None:
         except curses.error:  # pragma: no cover - terminals without color
             pass
         init_db()
+        session = SessionLocal()
+        try:
+            try:
+                ensure_default_account(session)
+            except OperationalError:
+                pass
+        finally:
+            session.close()
         while True:
             choice = select(
                 stdscr,
