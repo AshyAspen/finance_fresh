@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from bisect import bisect_left, bisect_right
 from curses import panel
 from contextlib import contextmanager
+from collections import defaultdict
 
-from .database import SessionLocal, init_db
+from .database import SessionLocal, init_db, ensure_default_account
+from sqlalchemy.exc import OperationalError
 from .models import (
     Transaction,
     Balance,
@@ -822,13 +824,19 @@ def prev_event(before: datetime, txns, recs):
 @dataclass
 class LedgerRow:
     timestamp: datetime
+    account_id: int
     description: str
     amount: float
-    running: float
+    running_account: float
+    running_total: float
 
     @property
     def date(self) -> date:
         return self.timestamp.date()
+
+    @property
+    def running(self) -> float:
+        return self.running_account
 
 
 def add_months(d: date, months: int) -> date:
@@ -844,22 +852,58 @@ def end_of_month(d: date, months: int = 0) -> date:
     return date(d.year, d.month, last)
 
 
-def ledger_rows(session, plan_start: date | None = None, plan_end: date | None = None):
-    bal = session.get(Balance, 1)
-    bal_amt = bal.amount if bal else 0.0
-    bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
+def ledger_rows(
+    session,
+    plan_start: date | None = None,
+    plan_end: date | None = None,
+    account_ids: list[int] | None = None,
+):
+    if account_ids is None:
+        ids = set()
+        ids.update(a for (a,) in session.query(Transaction.account_id).distinct())
+        ids.update(a for (a,) in session.query(Recurring.account_id).distinct())
+        ids.update(a for (a,) in session.query(Balance.account_id).distinct())
+        account_ids = sorted(ids)
+    if not account_ids:
+        account_ids = [ensure_default_account(session).id]
+
+    bal_map: dict[int, tuple[float, datetime]] = {}
+    for aid in account_ids:
+        row = (
+            session.query(Balance)
+            .filter(Balance.account_id == aid)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
+        amt = row.amount if row else 0.0
+        ts = row.timestamp if row and row.timestamp else datetime.combine(date.today(), datetime.min.time())
+        bal_map[aid] = (amt, ts)
+
+    min_bal_date = min(ts.date() for _, ts in bal_map.values())
 
     if plan_start is None or plan_end is None:
-        earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
-        earliest_date = earliest_tx.timestamp.date() if earliest_tx else bal_ts.date()
-        plan_start = min(earliest_date, bal_ts.date())
+        earliest_tx = (
+            session.query(Transaction)
+            .filter(Transaction.account_id.in_(account_ids))
+            .order_by(Transaction.timestamp)
+            .first()
+        )
+        earliest_date = earliest_tx.timestamp.date() if earliest_tx else min_bal_date
+        plan_start = min(earliest_date, min_bal_date)
         plan_end = date.today() + timedelta(days=3650)  # ~10 years
 
-    # real transactions
-    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
+    txns = (
+        session.query(Transaction)
+        .filter(Transaction.account_id.in_(account_ids))
+        .order_by(Transaction.timestamp)
+        .all()
+    )
 
-    # synthetic recurring transactions across horizon (base set)
-    recs = session.query(Recurring).all()
+    recs = (
+        session.query(Recurring)
+        .filter(Recurring.account_id.in_(account_ids))
+        .all()
+    )
     synthetic_txns: list[Transaction] = []
     for r in recs:
         anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
@@ -875,25 +919,27 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             )
     txns.extend(synthetic_txns)
 
-    # irregular forecast within planning window (appended after base set)
-    irr_start = max(date.today(), bal_ts.date())
-    irr_forecast = irregular_daily_series(
-        session,
-        irr_start,
-        plan_end,
-        mode=IRREG_MODE,
-        quantile=IRREG_QUANTILE,
-    )
+    irr_start = max(date.today(), min_bal_date)
     irr_series: list[Transaction] = []
-    for d, amt in irr_forecast:
-        if amt:
-            irr_series.append(
-                Transaction(
-                    description="Irregular",
-                    amount=-amt,
-                    timestamp=datetime.combine(d, datetime.min.time()),
+    default_acc = ensure_default_account(session)
+    if default_acc.id in account_ids:
+        irr_forecast = irregular_daily_series(
+            session,
+            irr_start,
+            plan_end,
+            mode=IRREG_MODE,
+            quantile=IRREG_QUANTILE,
+        )
+        for d, amt in irr_forecast:
+            if amt:
+                irr_series.append(
+                    Transaction(
+                        description="Irregular",
+                        amount=-amt,
+                        timestamp=datetime.combine(d, datetime.min.time()),
+                        account_id=default_acc.id,
+                    )
                 )
-            )
     txns.extend(irr_series)
 
     for t in synthetic_txns:
@@ -902,7 +948,7 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
         setattr(t, "_source_type", "irregular")
 
     def classify_priority(t):
-        src = getattr(t, "_source_type", "posted")  # posted|recurring|irregular
+        src = getattr(t, "_source_type", "posted")
         amt = t.amount or 0.0
         if src == "irregular":
             return (50, 0)
@@ -916,29 +962,33 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             classify_priority(t)[0],
             classify_priority(t)[1],
             getattr(t, "id", 0),
+            t.account_id,
             t.description or "",
             float(f"{abs(t.amount):.2f}"),
             t.timestamp,
         )
     )
 
-    # compute offset so running balance matches stored balance at bal_ts
     def is_posted(t):
         return getattr(t, "_source_type", "posted") == "posted"
 
-    total_before = 0.0
-    for t in txns:
-        if t.timestamp <= bal_ts and is_posted(t):
-            total_before += t.amount
-    offset = bal_amt - total_before
+    offset: dict[int, float] = {}
+    for aid, (bal_amt, bal_ts) in bal_map.items():
+        total_before = 0.0
+        for t in txns:
+            if t.account_id == aid and t.timestamp <= bal_ts and is_posted(t):
+                total_before += t.amount
+        offset[aid] = bal_amt - total_before
 
-    def effective_amount(t):
-        # For dates on/before bal_ts, ignore synthetic (recurring/irregular) amounts.
+    total_offset = sum(offset.values())
+
+    def effective_amount(t: Transaction) -> float:
+        bal_ts = bal_map[t.account_id][1]
         if t.timestamp <= bal_ts and not is_posted(t):
             return 0.0
         return t.amount
 
-    running = 0.0
+    running_by_acct: defaultdict[int, float] = defaultdict(float)
     last_ts: datetime | None = None
     bump = 0
     for t in txns:
@@ -949,12 +999,16 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
         else:
             last_ts = t.timestamp
             bump = 0
-        running += effective_amount(t)
+        running_by_acct[t.account_id] += effective_amount(t)
+        running_account = running_by_acct[t.account_id] + offset[t.account_id]
+        running_total = sum(running_by_acct.values()) + total_offset
         yield LedgerRow(
             t.timestamp + timedelta(microseconds=bump),
+            t.account_id,
             t.description,
             t.amount,
-            running + offset,
+            running_account,
+            running_total,
         )
 
 
@@ -981,12 +1035,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
             visible = h - 1
 
             while index < visible // 2:
-                prev = get_prev(rows[0].timestamp)
-                if prev is None:
+                prev_row = get_prev(rows[0].timestamp)
+                if prev_row is None:
                     break
-                prev_row = LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                )
                 rows.insert(0, prev_row)
                 desc_w = max(desc_w, len(prev_row.description))
                 amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
@@ -994,12 +1045,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 index += 1
 
             while len(rows) < visible:
-                nxt = get_next(rows[-1].timestamp)
-                if nxt is None:
+                next_row = get_next(rows[-1].timestamp)
+                if next_row is None:
                     break
-                next_row = LedgerRow(
-                    nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                )
                 rows.append(next_row)
                 desc_w = max(desc_w, len(next_row.description))
                 amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
@@ -1048,11 +1096,8 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 if index > 0:
                     index -= 1
                 else:
-                    prev = get_prev(rows[0].timestamp)
-                    if prev is not None:
-                        prev_row = LedgerRow(
-                            prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                        )
+                    prev_row = get_prev(rows[0].timestamp)
+                    if prev_row is not None:
                         rows.insert(0, prev_row)
                         desc_w = max(desc_w, len(prev_row.description))
                         amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
@@ -1061,11 +1106,8 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 if index < len(rows) - 1:
                     index += 1
                 else:
-                    nxt = get_next(rows[-1].timestamp)
-                    if nxt is not None:
-                        next_row = LedgerRow(
-                            nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                        )
+                    next_row = get_next(rows[-1].timestamp)
+                    if next_row is not None:
                         rows.append(next_row)
                         desc_w = max(desc_w, len(next_row.description))
                         amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
@@ -1272,15 +1314,27 @@ def scroll_menu(
 def ledger_view(stdscr) -> None:
     """Display a scrollable ledger as ``date | name | amount | balance``."""
     session = SessionLocal()
-    bal = session.get(Balance, 1)
+    default_acc = ensure_default_account(session)
+    bal = (
+        session.query(Balance)
+        .filter(Balance.account_id == default_acc.id)
+        .order_by(Balance.timestamp.desc())
+        .first()
+    )
     bal_amt = bal.amount if bal else 0.0
 
-    earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
+    earliest_tx = (
+        session.query(Transaction)
+        .filter(Transaction.account_id == default_acc.id)
+        .order_by(Transaction.timestamp)
+        .first()
+    )
     earliest_date = earliest_tx.timestamp.date() if earliest_tx else date.today()
     plan_start = earliest_date
     plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
+    account_scope = [default_acc.id]
 
-    rows = list(ledger_rows(session, plan_start, plan_end))
+    rows = list(ledger_rows(session, plan_start, plan_end, account_scope))
     if not rows:
         session.close()
         return
@@ -1294,7 +1348,7 @@ def ledger_view(stdscr) -> None:
 
     def rebuild():
         nonlocal rows, ts_list
-        rows = list(ledger_rows(session, plan_start, plan_end))
+        rows = list(ledger_rows(session, plan_start, plan_end, account_scope))
         ts_list = [r.timestamp for r in rows]
 
     def refresh(ts_current: datetime):
@@ -1314,8 +1368,7 @@ def ledger_view(stdscr) -> None:
             rebuild()
         idx = bisect_left(ts_list, ts_before) - 1
         if idx >= 0:
-            r = rows[idx]
-            return r.timestamp, r.description, r.amount
+            return rows[idx]
         return None
 
     def get_next(ts_after):
@@ -1325,8 +1378,7 @@ def ledger_view(stdscr) -> None:
             rebuild()
         idx = bisect_right(ts_list, ts_after)
         if idx < len(rows):
-            r = rows[idx]
-            return r.timestamp, r.description, r.amount
+            return rows[idx]
         return None
 
     get_prev.refresh = refresh  # type: ignore[attr-defined]
@@ -1805,6 +1857,14 @@ def main(stdscr) -> None:
         except curses.error:  # pragma: no cover - terminals without color
             pass
         init_db()
+        session = SessionLocal()
+        try:
+            try:
+                ensure_default_account(session)
+            except OperationalError:
+                pass
+        finally:
+            session.close()
         while True:
             choice = select(
                 stdscr,

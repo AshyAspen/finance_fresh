@@ -210,12 +210,9 @@ def test_ledger_view_displays_all_events(monkeypatch):
         def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
             rows = [initial_row]
             while True:
-                prev = get_prev(rows[0].timestamp)
-                if prev is None:
+                prev_row = get_prev(rows[0].timestamp)
+                if prev_row is None:
                     break
-                prev_row = cli.LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                )
                 rows.insert(0, prev_row)
                 if len(rows) >= 3:
                     break
@@ -447,19 +444,13 @@ def test_ledger_view_handles_multiple_recurring(monkeypatch):
 
         def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
             rows = [initial_row]
-            prev = get_prev(rows[0].timestamp)
-            if prev is not None:
-                prev_row = cli.LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                )
+            prev_row = get_prev(rows[0].timestamp)
+            if prev_row is not None:
                 rows.insert(0, prev_row)
             while len(rows) < 4:
-                nxt = get_next(rows[-1].timestamp)
-                if nxt is None:
+                next_row = get_next(rows[-1].timestamp)
+                if next_row is None:
                     break
-                next_row = cli.LedgerRow(
-                    nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                )
                 rows.append(next_row)
             captured["rows"] = rows
 
