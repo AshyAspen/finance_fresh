@@ -319,30 +319,44 @@ def transaction_form(stdscr, description: str, timestamp: datetime, amount: floa
 
 def add_transaction(stdscr) -> None:
     """Prompt user for transaction data and persist it."""
-    form = transaction_form(stdscr, "", datetime.utcnow(), 0.0)
-    if form is None:
-        return
-    description, timestamp, amount = form
     session = SessionLocal()
-    txn = Transaction(description=description, amount=amount, timestamp=timestamp)
-    session.add(txn)
-    session.commit()
+    try:
+        if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+            account_id = CURRENT_ACCOUNT_IDS[0]
+        else:
+            acct = pick_account(stdscr, session, "Transaction account")
+            if acct is None:
+                return
+            account_id = acct.id
 
-    category_id = match_category_id(session, txn.description, txn.account_id)
-    if category_id is not None:
-        state = get_or_create_state(session, category_id)
-        update_irregular_state(state, txn)
+        form = transaction_form(stdscr, "", datetime.utcnow(), 0.0)
+        if form is None:
+            return
+        description, timestamp, amount = form
+        txn = Transaction(
+            account_id=account_id,
+            description=description,
+            amount=amount,
+            timestamp=timestamp,
+        )
+        session.add(txn)
         session.commit()
-        cat = session.get(IrregularCategory, category_id)
-        if cat is not None:
-            avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
-            med = state.median_amount if state.median_amount is not None else 0.0
-            toast(
-                stdscr,
-                f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
-            )
 
-    session.close()
+        category_id = match_category_id(session, txn.description, txn.account_id)
+        if category_id is not None:
+            state = get_or_create_state(session, category_id)
+            update_irregular_state(state, txn)
+            session.commit()
+            cat = session.get(IrregularCategory, category_id)
+            if cat is not None:
+                avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
+                med = state.median_amount if state.median_amount is not None else 0.0
+                toast(
+                    stdscr,
+                    f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
+                )
+    finally:
+        session.close()
 
 
 def add_transfer(stdscr) -> None:

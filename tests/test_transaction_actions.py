@@ -39,6 +39,7 @@ def test_add_transaction_with_date(monkeypatch):
         monkeypatch.setattr(
             cli, "text", make_prompt(["Groceries", "2023-02-01", "20.5"])
         )
+        monkeypatch.setattr(cli, "CURRENT_ACCOUNT_IDS", [1], raising=False)
 
         cli.add_transaction(object())
 
@@ -229,6 +230,7 @@ def test_add_transaction_updates_irregular_state(monkeypatch):
             captured["msg"] = msg
 
         monkeypatch.setattr(cli, "toast", fake_toast)
+        monkeypatch.setattr(cli, "CURRENT_ACCOUNT_IDS", [1], raising=False)
 
         cli.add_transaction(object())
 
