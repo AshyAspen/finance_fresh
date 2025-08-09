@@ -400,47 +400,62 @@ def add_transfer(stdscr) -> None:
     """Prompt user for transfer details and persist it."""
 
     session = SessionLocal()
-    accounts = session.query(Account).filter(Account.archived == False).all()
-    if len(accounts) < 2:
-        session.close()
-        return
-
-    from_name = select(stdscr, "From account", [a.name for a in accounts])
-    if from_name is None:
-        session.close()
-        return
-    from_acc = next(a for a in accounts if a.name == from_name)
-
-    dest_choices = [a.name for a in accounts if a.id != from_acc.id]
-    to_name = select(stdscr, "To account", dest_choices)
-    if to_name is None:
-        session.close()
-        return
-    to_acc = next(a for a in accounts if a.name == to_name)
-
-    amt_str = text(stdscr, "Amount")
-    if amt_str is None:
-        session.close()
-        return
     try:
-        amount = float(amt_str)
-    except ValueError:
-        session.close()
-        return
+        accounts = (
+            session.query(Account)
+            .filter(Account.archived == False)
+            .order_by(Account.name)
+            .all()
+        )
+        if len(accounts) < 2:
+            return
 
-    date_str = text(
-        stdscr, "Date (YYYY-MM-DD)", default=datetime.utcnow().strftime("%Y-%m-%d")
-    )
-    if date_str is None:
-        session.close()
-        return
-    try:
-        when = datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        when = datetime.utcnow()
+        default_from = None
+        if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+            default_from = session.get(Account, CURRENT_ACCOUNT_IDS[0])
 
-    create_transfer(session, from_acc.id, to_acc.id, amount, when)
-    session.close()
+        from_acc = pick_account(
+            stdscr, session, "From account", default=default_from
+        )
+        if from_acc is None:
+            return
+
+        dest_accts = [a for a in accounts if a.id != from_acc.id]
+        if not dest_accts:
+            return
+        to_acc = select(
+            stdscr, "To account", [(a.name, a) for a in dest_accts]
+        )
+        if to_acc is None:
+            return
+
+        amt_str = text(stdscr, "Amount")
+        if amt_str is None:
+            return
+        try:
+            amount = float(amt_str)
+        except ValueError:
+            return
+
+        when_str = text(
+            stdscr,
+            "Date/time (YYYY-MM-DD HH:MM)",
+            default=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        )
+        if when_str is None:
+            return
+        try:
+            when = datetime.strptime(when_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            when = datetime.utcnow()
+
+        desc = text(stdscr, "Description", default="Transfer")
+        if desc is None:
+            desc = "Transfer"
+
+        create_transfer(session, from_acc.id, to_acc.id, amount, when, desc)
+    finally:
+        session.close()
 
 
 def max_payment_today_menu(stdscr) -> None:
@@ -2295,7 +2310,7 @@ def main(stdscr) -> None:
                 "Select an option",
                 choices=[
                     "List transactions",
-                    "New transfer",
+                    "New Transfer",
                     "Max safe payment (today)",
                     "Edit bills",
                     "Edit income",
@@ -2311,7 +2326,7 @@ def main(stdscr) -> None:
             )
             if choice == "List transactions":
                 list_transactions(stdscr)
-            elif choice == "New transfer":
+            elif choice == "New Transfer":
                 add_transfer(stdscr)
             elif choice == "Max safe payment (today)":
                 max_payment_today_menu(stdscr)
