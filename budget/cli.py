@@ -1757,7 +1757,14 @@ def ledger_view(stdscr) -> None:
 
 
 def irregular_category_form(
-    stdscr, name: str, window_days: int, alpha: float, safety_q: float, active: bool
+    stdscr,
+    session,
+    name: str,
+    window_days: int,
+    alpha: float,
+    safety_q: float,
+    active: bool,
+    account: Account | None = None,
 ):
     """Prompt for irregular category fields and return updated values."""
 
@@ -1776,6 +1783,15 @@ def irregular_category_form(
     active_str = text(stdscr, "Active (Y/N)", default="Y" if active else "N")
     if active_str is None:
         return None
+    if account is not None:
+        default_acct = account
+    elif CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+        default_acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+    else:
+        default_acct = None
+    acct = pick_account(stdscr, session, "Account", default=default_acct)
+    if acct is None:
+        return None
     try:
         window_days_val = int(win_str)
         alpha_val = float(alpha_str)
@@ -1783,7 +1799,14 @@ def irregular_category_form(
     except ValueError:
         return None
     active_val = active_str.strip().lower() in ("y", "yes", "true", "1")
-    return name_new, window_days_val, alpha_val, safety_val, active_val
+    return (
+        name_new,
+        window_days_val,
+        alpha_val,
+        safety_val,
+        active_val,
+        acct.id,
+    )
 
 
 def edit_irregular_category(
@@ -1791,17 +1814,22 @@ def edit_irregular_category(
 ) -> None:
     """Add or edit an irregular category."""
 
+    existing_acct = (
+        session.get(Account, existing.account_id) if existing else None
+    )
     form = irregular_category_form(
         stdscr,
+        session,
         existing.name if existing else "",
         existing.window_days if existing else 120,
         existing.alpha if existing else 0.3,
         existing.safety_quantile if existing else 0.8,
         existing.active if existing else True,
+        existing_acct,
     )
     if form is None:
         return
-    name, window_days, alpha, safety_q, active = form
+    name, window_days, alpha, safety_q, active, account_id = form
     if existing is None:
         cat = IrregularCategory(
             name=name,
@@ -1809,6 +1837,7 @@ def edit_irregular_category(
             alpha=alpha,
             safety_quantile=safety_q,
             active=active,
+            account_id=account_id,
         )
         session.add(cat)
     else:
@@ -1820,6 +1849,9 @@ def edit_irregular_category(
         cat.alpha = alpha
         cat.safety_quantile = safety_q
         cat.active = active
+        cat.account_id = account_id
+        for rule in cat.rules:
+            rule.account_id = account_id
     session.commit()
 
 
@@ -1841,7 +1873,9 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
-            header = f"Rules for {category.name}"
+            acct = session.get(Account, category.account_id)
+            acct_name = acct.name if acct else ""
+            header = f"Rules for {category.name} ({acct_name})"
             offset = 1
             visible = min(len(entries), h - 1 - offset)
             top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
@@ -1901,7 +1935,10 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
                 if pattern:
                     session.add(
                         IrregularRule(
-                            category_id=category.id, pattern=pattern, active=True
+                            category_id=category.id,
+                            account_id=category.account_id,
+                            pattern=pattern,
+                            active=True,
                         )
                     )
                     session.commit()
@@ -1966,8 +2003,19 @@ def irregular_menu(stdscr) -> None:
         while True:
             cats = categories(session)
             name_w = max((len(c.name) for c in cats), default=0)
+            acct_map = {
+                a.id: a.name
+                for a in session.query(Account)
+                .filter(Account.id.in_([c.account_id for c in cats]))
+                .all()
+            }
+            acct_w = max((len(acct_map.get(c.account_id, "")) for c in cats), default=0)
             entries = [
-                f"{c.name:<{name_w}} | {c.window_days:>3} | {c.alpha:.2f} | {c.safety_quantile:.2f} | {'Y' if c.active else 'N'}"
+                (
+                    f"{c.name:<{name_w}} | {acct_map.get(c.account_id, ''):<{acct_w}} | "
+                    f"{c.window_days:>3} | {c.alpha:.2f} | {c.safety_quantile:.2f} | "
+                    f"{'Y' if c.active else 'N'}"
+                )
                 for c in cats
             ]
 
