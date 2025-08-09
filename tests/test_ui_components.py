@@ -15,6 +15,7 @@ def test_select_uses_scroll_menu(monkeypatch):
         return 1  # choose second item
 
     monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+    monkeypatch.setattr(cli, "list_accounts", lambda s: [])
 
     class DummySession:
         def get(self, model, ident):
@@ -259,6 +260,7 @@ def test_select_returns_none_on_quit(monkeypatch):
         return None
 
     monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
+    monkeypatch.setattr(cli, "list_accounts", lambda s: [])
 
     class DummySession:
         def get(self, model, ident):

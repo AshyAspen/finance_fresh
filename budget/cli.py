@@ -78,14 +78,51 @@ def select(stdscr, message, choices, default=None, boxed=True):
             default_idx = idx
 
     with SessionLocal() as s:
-        bal = s.get(Balance, 1)
-        bal_amt = bal.amount if bal else 0.0
+        footer_right = ""
+        if CURRENT_ACCOUNT_IDS is None:
+            accts = list_accounts(s)
+        else:
+            accts = (
+                s.query(Account)
+                .filter(Account.id.in_(CURRENT_ACCOUNT_IDS))
+                .order_by(Account.name)
+                .all()
+            )
+        if accts:
+            if len(accts) == 1:
+                acct = accts[0]
+                bal_row = (
+                    s.query(Balance)
+                    .filter(Balance.account_id == acct.id)
+                    .order_by(Balance.timestamp.desc())
+                    .first()
+                )
+                amt = bal_row.amount if bal_row else 0.0
+                ts = (
+                    bal_row.timestamp.strftime("%Y-%m-%d")
+                    if bal_row and bal_row.timestamp
+                    else "n/a"
+                )
+                footer_right = f"{acct.name}: {amt:.2f} @ {ts}"
+            else:
+                parts: list[str] = []
+                for acct in accts:
+                    bal_row = (
+                        s.query(Balance)
+                        .filter(Balance.account_id == acct.id)
+                        .order_by(Balance.timestamp.desc())
+                        .first()
+                    )
+                    amt = bal_row.amount if bal_row else 0.0
+                    parts.append(f"{acct.name}:{amt:.2f}")
+                footer_right = "; ".join(parts)
+
     selected = scroll_menu(
         stdscr,
         titles,
         default_idx,
         header=message,
-        footer_right=f"{bal_amt:.2f}",
+        footer_right=footer_right,
         boxed=boxed,
     )
     if selected is None:
@@ -769,25 +806,88 @@ def list_transactions(stdscr) -> None:
     session.close()
 
 
+def _show_balances(stdscr, lines: list[str]) -> None:
+    if not lines:
+        return
+    width = max(len(line) for line in lines) + 4
+    height = len(lines) + 2
+    with modal_box(stdscr, height, width) as win:
+        for idx, line in enumerate(lines, start=1):
+            try:
+                win.addnstr(idx, 2, line, width - 4)
+            except curses.error:
+                pass
+        try:
+            win.refresh()
+        except curses.error:
+            pass
+        win.getch()
+
+
 def set_balance(stdscr) -> None:
     """Prompt the user to store their current balance."""
-    amount_str = text(stdscr, "Current balance")
-    if amount_str is None:
-        return
-    try:
-        amount = float(amount_str)
-    except ValueError:
-        return
     session = SessionLocal()
-    bal = session.get(Balance, 1)
-    if bal is None:
-        bal = Balance(id=1, amount=amount, timestamp=datetime.utcnow())
-        session.add(bal)
-    else:
-        bal.amount = amount
-        bal.timestamp = datetime.utcnow()
-    session.commit()
-    session.close()
+    try:
+        acct: Account | None
+        if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+            acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+        else:
+            # Show existing balances for context
+            scope_ids = (
+                CURRENT_ACCOUNT_IDS
+                if CURRENT_ACCOUNT_IDS is not None
+                else [a.id for a in list_accounts(session)]
+            )
+            lines: list[str] = []
+            for aid in scope_ids:
+                a = session.get(Account, aid)
+                bal_row = (
+                    session.query(Balance)
+                    .filter(Balance.account_id == aid)
+                    .order_by(Balance.timestamp.desc())
+                    .first()
+                )
+                amt = bal_row.amount if bal_row else 0.0
+                ts = (
+                    bal_row.timestamp.strftime("%Y-%m-%d")
+                    if bal_row and bal_row.timestamp
+                    else "n/a"
+                )
+                lines.append(f"{a.name}: {amt:.2f} @ {ts}")
+            _show_balances(stdscr, lines)
+            acct = pick_account(stdscr, session, "Balance for account")
+        if acct is None:
+            return
+
+        bal_row = (
+            session.query(Balance)
+            .filter(Balance.account_id == acct.id)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
+        default_amt = f"{bal_row.amount:.2f}" if bal_row else None
+        ts_str = (
+            bal_row.timestamp.strftime("%Y-%m-%d")
+            if bal_row and bal_row.timestamp
+            else "n/a"
+        )
+        amount_str = text(
+            stdscr,
+            f"Balance for {acct.name} (last {ts_str})",
+            default=default_amt,
+        )
+        if amount_str is None:
+            return
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            return
+        session.add(
+            Balance(amount=amount, timestamp=datetime.utcnow(), account_id=acct.id)
+        )
+        session.commit()
+    finally:
+        session.close()
 
 
 def settings_help_menu(stdscr) -> None:

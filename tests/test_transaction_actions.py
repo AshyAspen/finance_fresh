@@ -83,9 +83,15 @@ def test_set_balance(monkeypatch):
     try:
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(cli, "text", make_prompt(["100.0"]))
+        monkeypatch.setattr(cli, "CURRENT_ACCOUNT_IDS", [1], raising=False)
         cli.set_balance(object())
         session = Session()
-        bal = session.get(Balance, 1)
+        bal = (
+            session.query(Balance)
+            .filter(Balance.account_id == 1)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
         assert bal is not None
         assert bal.amount == 100.0
     finally:
