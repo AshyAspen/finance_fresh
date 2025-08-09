@@ -890,6 +890,9 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             t.timestamp.date(),
             classify_priority(t)[0],
             classify_priority(t)[1],
+            getattr(t, "id", 0),
+            t.description or "",
+            float(f"{abs(t.amount):.2f}"),
             t.timestamp,
         )
     )
@@ -904,6 +907,12 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             total_before += t.amount
     offset = bal_amt - total_before
 
+    def effective_amount(t):
+        # For dates on/before bal_ts, ignore synthetic (recurring/irregular) amounts.
+        if t.timestamp <= bal_ts and not is_posted(t):
+            return 0.0
+        return t.amount
+
     running = 0.0
     last_ts: datetime | None = None
     bump = 0
@@ -915,7 +924,7 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
         else:
             last_ts = t.timestamp
             bump = 0
-        running += t.amount
+        running += effective_amount(t)
         yield LedgerRow(
             t.timestamp + timedelta(microseconds=bump),
             t.description,
@@ -1241,8 +1250,10 @@ def ledger_view(stdscr) -> None:
 
     def refresh(ts_current: datetime):
         rebuild()
-        ts_clean = ts_current.replace(microsecond=0)
-        idx = bisect_right(ts_list, ts_clean) - 1
+        target_date = ts_current.date()
+        # Use a date list for bisection to avoid microsecond bump issues
+        date_list = [r.timestamp.date() for r in rows]
+        idx = bisect_right(date_list, target_date) - 1
         if idx < 0:
             idx = 0
         return rows[idx]
