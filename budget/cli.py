@@ -885,23 +885,43 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             return (20, 0) if amt > 0 else (30, 0)
         return (20, 0) if amt > 0 else (40, 0)
 
-    txns.sort(key=lambda t: (t.timestamp.date(), classify_priority(t)[0], classify_priority(t)[1], t.timestamp))
-    for idx, t in enumerate(txns):
-        t.timestamp = t.timestamp + timedelta(microseconds=idx)
+    txns.sort(
+        key=lambda t: (
+            t.timestamp.date(),
+            classify_priority(t)[0],
+            classify_priority(t)[1],
+            t.timestamp,
+        )
+    )
 
     # compute offset so running balance matches stored balance at bal_ts
+    def is_posted(t):
+        return getattr(t, "_source_type", "posted") == "posted"
+
     total_before = 0.0
     for t in txns:
-        if t.timestamp <= bal_ts:
+        if t.timestamp <= bal_ts and is_posted(t):
             total_before += t.amount
     offset = bal_amt - total_before
 
     running = 0.0
+    last_ts: datetime | None = None
+    bump = 0
     for t in txns:
         if not (plan_start <= t.timestamp.date() <= plan_end):
             continue
+        if t.timestamp == last_ts:
+            bump += 1
+        else:
+            last_ts = t.timestamp
+            bump = 0
         running += t.amount
-        yield LedgerRow(t.timestamp, t.description, t.amount, running + offset)
+        yield LedgerRow(
+            t.timestamp + timedelta(microseconds=bump),
+            t.description,
+            t.amount,
+            running + offset,
+        )
 
 
 def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
@@ -1208,8 +1228,8 @@ def ledger_view(stdscr) -> None:
         return
 
     ts_list = [r.timestamp for r in rows]
-    today_dt = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
-    start_idx = bisect_right(ts_list, today_dt) - 1
+    today_date = date.today()
+    start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
     if start_idx < 0:
         start_idx = 0
     initial_row = rows[start_idx]
