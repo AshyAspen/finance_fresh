@@ -5,7 +5,7 @@ from budget.services import max_safe_payment_today, simulate_balances
 from tests.helpers import get_temp_session
 
 
-def test_max_safe_payment_today():
+def test_max_safe_payment_monotonic():
     Session, _ = get_temp_session()
     session = Session()
 
@@ -36,6 +36,7 @@ def test_max_safe_payment_today():
     buffers = {1: 100.0}
 
     safe = max_safe_payment_today(session, 1, buffers, horizon_days=59)
+    safe = round(safe, 2)
     assert abs(safe - 500.0) < 0.02
 
     # safe amount keeps balance above buffer
@@ -48,13 +49,13 @@ def test_max_safe_payment_today():
     )
     assert all(b >= 100.0 for _, b in balances_safe[1])
 
-    # paying one more dollar violates buffer
+    # paying slightly more violates buffer
     balances_too_much = simulate_balances(
         session,
         today,
         today + timedelta(days=59),
         [1],
-        {1: -(safe + 1)},
+        {1: -(safe + 0.01)},
     )
     assert any(b < 100.0 for _, b in balances_too_much[1])
 

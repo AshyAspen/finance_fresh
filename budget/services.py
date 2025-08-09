@@ -268,4 +268,4 @@ def max_safe_payment_today(
             lo = mid
         else:
             hi = mid
-    return round(lo, 2)
+    return round((lo + hi) / 2, 2)
