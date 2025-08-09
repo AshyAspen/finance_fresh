@@ -1348,11 +1348,18 @@ def ledger_curses(
     index = 0
 
     with temp_cursor(0), keypad_mode(stdscr):
-        desc_w = len(initial_row.description)
-        amt_w = len(f"{initial_row.amount:.2f}")
-        run_w = len(f"{initial_row.running_account:.2f}")
-        acct_w = max(len(n) for n in account_names.values()) if multi else 0
-        tot_w = len(f"{initial_row.running_total:.2f}") if multi else 0
+        if multi:
+            acct_w = max(len("Account"), max(len(n) for n in account_names.values()))
+            desc_w = max(len("Description"), len(initial_row.description))
+            amt_w = max(len("Amount"), len(f"{initial_row.amount:.2f}"))
+            run_w = max(len("Balance (Acct)"), len(f"{initial_row.running_account:.2f}"))
+            tot_w = max(len("Balance (Total)"), len(f"{initial_row.running_total:.2f}"))
+        else:
+            desc_w = max(len("Description"), len(initial_row.description))
+            amt_w = max(len("Amount"), len(f"{initial_row.amount:.2f}"))
+            run_w = max(len("Balance"), len(f"{initial_row.running_account:.2f}"))
+            acct_w = 0
+            tot_w = 0
         mode_label = (
             "Deterministic"
             if IRREG_MODE == "deterministic"
@@ -1364,7 +1371,7 @@ def ledger_curses(
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
-            visible = h - 1
+            visible = h - 2 if multi else h - 1
 
             while index < visible // 2:
                 prev_row = get_prev(rows[0].timestamp)
@@ -1392,6 +1399,23 @@ def ledger_curses(
             top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
 
             stdscr.erase()
+            if multi:
+                header = (
+                    f"{'Date'} | "
+                    f"{'Account':<{acct_w}} | "
+                    f"{'Description':<{desc_w}} | "
+                    f"{'Amount':>{amt_w}} | "
+                    f"{'Balance (Acct)':>{run_w}} | "
+                    f"{'Balance (Total)':>{tot_w}}"
+                )
+                try:
+                    stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
+                except curses.error:
+                    pass
+                row_y_start = 1
+            else:
+                row_y_start = 0
+
             for i in range(visible):
                 line_idx = top + i
                 if line_idx >= len(rows):
@@ -1415,7 +1439,7 @@ def ledger_curses(
                     )
                 attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
                 try:
-                    stdscr.addnstr(i, 0, line, w - 1, attr)
+                    stdscr.addnstr(row_y_start + i, 0, line, w - 1, attr)
                 except curses.error:
                     pass
 
