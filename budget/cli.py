@@ -10,7 +10,24 @@ from curses import panel
 from contextlib import contextmanager
 
 from .database import SessionLocal, init_db
-from .models import Transaction, Balance, Recurring, Goal
+from .models import (
+    Transaction,
+    Balance,
+    Recurring,
+    Goal,
+    IrregularCategory,
+    IrregularRule,
+    IrregularState,
+)
+from .services_irregular import (
+    irregular_daily_series,
+    learn_irregular_state,
+    categories,
+    match_category_id,
+    update_irregular_state,
+    get_or_create_state,
+)
+from .services import occurrences_between
 
 FREQUENCIES = [
     "weekly",
@@ -21,6 +38,14 @@ FREQUENCIES = [
     "semi annually",
     "annually",
 ]
+
+# irregular forecast mode stored for session
+IRREG_MODE = "monte_carlo"
+IRREG_QUANTILE = "p80"
+
+INITIAL_FORWARD_MONTHS = 18
+EXTEND_CHUNK_MONTHS = 6
+EDGE_TRIGGER_DAYS = 14
 
 
 def select(stdscr, message, choices, default=None, boxed=True):
@@ -256,6 +281,21 @@ def add_transaction(stdscr) -> None:
     txn = Transaction(description=description, amount=amount, timestamp=timestamp)
     session.add(txn)
     session.commit()
+
+    category_id = match_category_id(session, txn.description)
+    if category_id is not None:
+        state = get_or_create_state(session, category_id)
+        update_irregular_state(state, txn)
+        session.commit()
+        cat = session.get(IrregularCategory, category_id)
+        if cat is not None:
+            avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
+            med = state.median_amount if state.median_amount is not None else 0.0
+            toast(
+                stdscr,
+                f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
+            )
+
     session.close()
 
 
@@ -411,10 +451,16 @@ def edit_recurring(stdscr, is_income: bool) -> None:
         desc_w = max((len(r.description) for r in recs), default=0)
         freq_w = max((len(r.frequency) for r in recs), default=0)
         amt_w = max((len(f"{r.amount:.2f}") for r in recs), default=0)
-        entries = [
-            f"{r.start_date.strftime('%Y-%m-%d')} | {r.description:<{desc_w}} | {r.frequency:<{freq_w}} | {r.amount:>{amt_w}.2f}"
-            for r in recs
-        ]
+        entries = []
+        for r in recs:
+            anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+            next_occ = occurrences_between(
+                anchor, r.frequency, date.today(), date.today() + timedelta(days=365)
+            )
+            next_str = next_occ[0].strftime("%Y-%m-%d") if next_occ else "n/a"
+            entries.append(
+                f"{r.start_date.strftime('%Y-%m-%d')} | {r.description:<{desc_w}} | {r.frequency:<{freq_w}} | {r.amount:>{amt_w}.2f} | Next occurrence: {next_str}"
+            )
         entries.append("Back")
         bal = session.get(Balance, 1)
         bal_amt = bal.amount if bal else 0.0
@@ -531,6 +577,35 @@ def set_balance(stdscr) -> None:
         bal.timestamp = datetime.utcnow()
     session.commit()
     session.close()
+
+
+def settings_help_menu(stdscr) -> None:
+    """Allow adjusting simple runtime settings."""
+
+    global IRREG_MODE, IRREG_QUANTILE
+    while True:
+        mode_label = (
+            "Deterministic"
+            if IRREG_MODE == "deterministic"
+            else ("Monte Carlo P50" if IRREG_QUANTILE == "p50" else "Monte Carlo P80")
+        )
+        choice = select(
+            stdscr,
+            "Settings / Help",
+            [(f"Irregular forecast: {mode_label}", "toggle"), "Back"],
+            boxed=False,
+        )
+        if choice == "toggle":
+            if IRREG_MODE == "deterministic":
+                IRREG_MODE = "monte_carlo"
+                IRREG_QUANTILE = "p50"
+            elif IRREG_QUANTILE == "p50":
+                IRREG_QUANTILE = "p80"
+            else:
+                IRREG_MODE = "deterministic"
+                IRREG_QUANTILE = "p80"
+        else:
+            break
 
 
 def add_months(d: date, months: int) -> date:
@@ -731,54 +806,135 @@ class LedgerRow:
         return self.timestamp.date()
 
 
-def ledger_rows(session):
+def add_months(d: date, months: int) -> date:
+    year = d.year + (d.month - 1 + months) // 12
+    month = (d.month - 1 + months) % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def end_of_month(d: date, months: int = 0) -> date:
+    d = add_months(d, months)
+    last = calendar.monthrange(d.year, d.month)[1]
+    return date(d.year, d.month, last)
+
+
+def ledger_rows(session, plan_start: date | None = None, plan_end: date | None = None):
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
     bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
+
+    if plan_start is None or plan_end is None:
+        earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
+        earliest_date = earliest_tx.timestamp.date() if earliest_tx else bal_ts.date()
+        plan_start = min(earliest_date, bal_ts.date())
+        plan_end = date.today() + timedelta(days=3650)  # ~10 years
+
+    # real transactions
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
+
+    # synthetic recurring transactions across horizon (base set)
     recs = session.query(Recurring).all()
+    synthetic_txns: list[Transaction] = []
+    for r in recs:
+        anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+        occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
+        for occ in occs:
+            synthetic_txns.append(
+                Transaction(
+                    description=r.description,
+                    amount=r.amount,
+                    timestamp=datetime.combine(occ, datetime.min.time()),
+                    account_id=r.account_id,
+                )
+            )
+    txns.extend(synthetic_txns)
 
-    def total_up_to(ts: datetime) -> float:
-        total = 0.0
-        for t in txns:
-            if t.timestamp <= ts:
-                total += t.amount
-        for r in recs:
-            total += count_occurrences(r.start_date.date(), r.frequency, ts.date()) * r.amount
-        return total
+    # irregular forecast within planning window (appended after base set)
+    irr_start = max(date.today(), bal_ts.date())
+    irr_forecast = irregular_daily_series(
+        session,
+        irr_start,
+        plan_end,
+        mode=IRREG_MODE,
+        quantile=IRREG_QUANTILE,
+    )
+    irr_series: list[Transaction] = []
+    for d, amt in irr_forecast:
+        if amt:
+            irr_series.append(
+                Transaction(
+                    description="Irregular",
+                    amount=-amt,
+                    timestamp=datetime.combine(d, datetime.min.time()),
+                )
+            )
+    txns.extend(irr_series)
 
-    offset = bal_amt - total_up_to(bal_ts)
-    txn_iter = iter(txns)
-    next_txn = next(txn_iter, None)
-    occurrences = [(r.start_date, r) for r in recs]
+    for t in synthetic_txns:
+        setattr(t, "_source_type", "recurring")
+    for t in irr_series:
+        setattr(t, "_source_type", "irregular")
+
+    def classify_priority(t):
+        src = getattr(t, "_source_type", "posted")  # posted|recurring|irregular
+        amt = t.amount or 0.0
+        if src == "irregular":
+            return (50, 0)
+        if src == "recurring":
+            return (20, 0) if amt > 0 else (30, 0)
+        return (20, 0) if amt > 0 else (40, 0)
+
+    txns.sort(
+        key=lambda t: (
+            t.timestamp.date(),
+            classify_priority(t)[0],
+            classify_priority(t)[1],
+            getattr(t, "id", 0),
+            t.description or "",
+            float(f"{abs(t.amount):.2f}"),
+            t.timestamp,
+        )
+    )
+
+    # compute offset so running balance matches stored balance at bal_ts
+    def is_posted(t):
+        return getattr(t, "_source_type", "posted") == "posted"
+
+    total_before = 0.0
+    for t in txns:
+        if t.timestamp <= bal_ts and is_posted(t):
+            total_before += t.amount
+    offset = bal_amt - total_before
+
+    def effective_amount(t):
+        # For dates on/before bal_ts, ignore synthetic (recurring/irregular) amounts.
+        if t.timestamp <= bal_ts and not is_posted(t):
+            return 0.0
+        return t.amount
+
     running = 0.0
-
-    while True:
-        next_ts: datetime | None = None
-        next_kind = None
-        if next_txn is not None:
-            next_ts = next_txn.timestamp
-            next_kind = ("txn", next_txn)
-        for idx, (occ_dt, rec) in enumerate(occurrences):
-            if next_ts is None or occ_dt <= next_ts:
-                next_ts = occ_dt
-                next_kind = ("rec", idx)
-        if next_kind is None:
-            break
-        if next_kind[0] == "txn":
-            running += next_txn.amount
-            yield LedgerRow(next_txn.timestamp, next_txn.description, next_txn.amount, running + offset)
-            next_txn = next(txn_iter, None)
+    last_ts: datetime | None = None
+    bump = 0
+    for t in txns:
+        if not (plan_start <= t.timestamp.date() <= plan_end):
+            continue
+        if t.timestamp == last_ts:
+            bump += 1
         else:
-            idx = next_kind[1]
-            occ_dt, rec = occurrences[idx]
-            running += rec.amount
-            yield LedgerRow(occ_dt, rec.description, rec.amount, running + offset)
-            next_occ = datetime.combine(advance_date(occ_dt.date(), rec.frequency), datetime.min.time())
-            occurrences[idx] = (next_occ, rec)
+            last_ts = t.timestamp
+            bump = 0
+        running += effective_amount(t)
+        yield LedgerRow(
+            t.timestamp + timedelta(microseconds=bump),
+            t.description,
+            t.amount,
+            running + offset,
+        )
 
 
 def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+    global IRREG_MODE, IRREG_QUANTILE
     rows = [initial_row]
     index = 0
 
@@ -786,7 +942,12 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
         desc_w = len(initial_row.description)
         amt_w = len(f"{initial_row.amount:.2f}")
         run_w = len(f"{initial_row.running:.2f}")
-        footer_left = date.today().isoformat()
+        mode_label = (
+            "Deterministic"
+            if IRREG_MODE == "deterministic"
+            else f"MC {IRREG_QUANTILE.upper()}"
+        )
+        footer_left = f"Irregular forecast: {mode_label}"
 
         while True:
             h, w = stdscr.getmaxyx()
@@ -893,6 +1054,29 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 index = 0
             elif key == curses.KEY_END:
                 index = len(rows) - 1
+            elif key in (ord("t"), ord("T")):
+                if IRREG_MODE == "deterministic":
+                    IRREG_MODE = "monte_carlo"
+                    IRREG_QUANTILE = "p50"
+                elif IRREG_QUANTILE == "p50":
+                    IRREG_QUANTILE = "p80"
+                else:
+                    IRREG_MODE = "deterministic"
+                    IRREG_QUANTILE = "p80"
+                current_ts = rows[index].timestamp
+                if hasattr(get_prev, "refresh"):
+                    new_row = get_prev.refresh(current_ts)
+                    rows = [new_row]
+                    index = 0
+                    desc_w = len(new_row.description)
+                    amt_w = len(f"{new_row.amount:.2f}")
+                    run_w = len(f"{new_row.running:.2f}")
+                mode_label = (
+                    "Deterministic"
+                    if IRREG_MODE == "deterministic"
+                    else f"MC {IRREG_QUANTILE.upper()}"
+                )
+                footer_left = f"Irregular forecast: {mode_label}"
             elif key == ord("q"):
                 break
 
@@ -1038,43 +1222,368 @@ def scroll_menu(
 
 def ledger_view(stdscr) -> None:
     """Display a scrollable ledger as ``date | name | amount | balance``."""
-
     session = SessionLocal()
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
-    bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
-    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
-    recs = session.query(Recurring).all()
-    today = date.today()
-    start_ev = prev_event(datetime.combine(today + timedelta(days=1), datetime.min.time()), txns, recs)
-    if start_ev is None:
-        start_ev = next_event(datetime.combine(today - timedelta(days=1), datetime.min.time()), txns, recs)
-    if start_ev is None:
+
+    earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
+    earliest_date = earliest_tx.timestamp.date() if earliest_tx else date.today()
+    plan_start = earliest_date
+    plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
+
+    rows = list(ledger_rows(session, plan_start, plan_end))
+    if not rows:
         session.close()
         return
-    start_ts, start_desc, start_amt = start_ev
 
-    def total_up_to(ts: datetime) -> float:
-        total = 0.0
-        for t in txns:
-            if t.timestamp <= ts:
-                total += t.amount
-        for r in recs:
-            total += count_occurrences(r.start_date.date(), r.frequency, ts.date()) * r.amount
-        return total
+    ts_list = [r.timestamp for r in rows]
+    today_date = date.today()
+    start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
+    if start_idx < 0:
+        start_idx = 0
+    initial_row = rows[start_idx]
 
-    offset = bal_amt - total_up_to(bal_ts)
-    start_running = total_up_to(start_ts) + offset
-    initial_row = LedgerRow(start_ts, start_desc, start_amt, start_running)
+    def rebuild():
+        nonlocal rows, ts_list
+        rows = list(ledger_rows(session, plan_start, plan_end))
+        ts_list = [r.timestamp for r in rows]
 
-    def get_next(ts_after):
-        return next_event(ts_after, txns, recs)
+    def refresh(ts_current: datetime):
+        rebuild()
+        target_date = ts_current.date()
+        # Use a date list for bisection to avoid microsecond bump issues
+        date_list = [r.timestamp.date() for r in rows]
+        idx = bisect_right(date_list, target_date) - 1
+        if idx < 0:
+            idx = 0
+        return rows[idx]
 
     def get_prev(ts_before):
-        return prev_event(ts_before, txns, recs)
+        nonlocal plan_start
+        if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
+            plan_start = add_months(plan_start, -EXTEND_CHUNK_MONTHS)
+            rebuild()
+        idx = bisect_left(ts_list, ts_before) - 1
+        if idx >= 0:
+            r = rows[idx]
+            return r.timestamp, r.description, r.amount
+        return None
 
-    session.close()
+    def get_next(ts_after):
+        nonlocal plan_end
+        if (plan_end - ts_after.date()).days <= EDGE_TRIGGER_DAYS:
+            plan_end = end_of_month(plan_end, EXTEND_CHUNK_MONTHS)
+            rebuild()
+        idx = bisect_right(ts_list, ts_after)
+        if idx < len(rows):
+            r = rows[idx]
+            return r.timestamp, r.description, r.amount
+        return None
+
+    get_prev.refresh = refresh  # type: ignore[attr-defined]
     ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt)
+    session.close()
+
+
+def irregular_category_form(
+    stdscr, name: str, window_days: int, alpha: float, safety_q: float, active: bool
+):
+    """Prompt for irregular category fields and return updated values."""
+
+    name_new = text(stdscr, "Name", default=name)
+    if name_new is None:
+        return None
+    win_str = text(stdscr, "Window days", default=str(window_days))
+    if win_str is None:
+        return None
+    alpha_str = text(stdscr, "Alpha", default=str(alpha))
+    if alpha_str is None:
+        return None
+    safety_str = text(stdscr, "Safety quantile", default=str(safety_q))
+    if safety_str is None:
+        return None
+    active_str = text(stdscr, "Active (Y/N)", default="Y" if active else "N")
+    if active_str is None:
+        return None
+    try:
+        window_days_val = int(win_str)
+        alpha_val = float(alpha_str)
+        safety_val = float(safety_str)
+    except ValueError:
+        return None
+    active_val = active_str.strip().lower() in ("y", "yes", "true", "1")
+    return name_new, window_days_val, alpha_val, safety_val, active_val
+
+
+def edit_irregular_category(
+    stdscr, session, existing: IrregularCategory | None = None
+) -> None:
+    """Add or edit an irregular category."""
+
+    form = irregular_category_form(
+        stdscr,
+        existing.name if existing else "",
+        existing.window_days if existing else 120,
+        existing.alpha if existing else 0.3,
+        existing.safety_quantile if existing else 0.8,
+        existing.active if existing else True,
+    )
+    if form is None:
+        return
+    name, window_days, alpha, safety_q, active = form
+    if existing is None:
+        cat = IrregularCategory(
+            name=name,
+            window_days=window_days,
+            alpha=alpha,
+            safety_quantile=safety_q,
+            active=active,
+        )
+        session.add(cat)
+    else:
+        cat = session.get(IrregularCategory, existing.id)
+        if cat is None:
+            return
+        cat.name = name
+        cat.window_days = window_days
+        cat.alpha = alpha
+        cat.safety_quantile = safety_q
+        cat.active = active
+    session.commit()
+
+
+def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
+    """Manage rules for an irregular category."""
+
+    session = SessionLocal()
+    index = 0
+    with temp_cursor(0), keypad_mode(stdscr):
+        while True:
+            rules = (
+                session.query(IrregularRule)
+                .filter(IrregularRule.category_id == category.id)
+                .order_by(IrregularRule.id)
+                .all()
+            )
+            entries = [r.pattern for r in rules]
+
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            header = f"Rules for {category.name}"
+            offset = 1
+            visible = min(len(entries), h - 1 - offset)
+            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+
+            stdscr.erase()
+            head_x = max(0, (w - len(header)) // 2)
+            try:
+                stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+            except curses.error:
+                pass
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(entries):
+                    break
+                line = entries[line_idx]
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
+
+            footer_l = date.today().isoformat()
+            pos = f"{index + 1}/{len(entries)}" if entries else "0/0"
+            footer_r = f"a:add d:del p:prev {pos}".strip()
+            try:
+                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                stdscr.addnstr(
+                    h - 1,
+                    max(0, w - len(footer_r)),
+                    footer_r,
+                    len(footer_r),
+                )
+            except curses.error:
+                pass
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                curses.resize_term(0, 0)
+                stdscr.clearok(True)
+                continue
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                index += 1
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - visible)
+            elif key == curses.KEY_NPAGE:
+                index = min(len(entries) - 1, index + visible)
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(entries) - 1
+            elif key in (ord("a"), ord("A")):
+                pattern = text(stdscr, "Pattern")
+                if pattern:
+                    session.add(
+                        IrregularRule(category_id=category.id, pattern=pattern, active=True)
+                    )
+                    session.commit()
+            elif key in (ord("d"), ord("D")) and rules:
+                rule = rules[index]
+                if confirm(stdscr, "Delete this rule?"):
+                    session.delete(rule)
+                    session.commit()
+                    index = max(0, index - 1)
+            elif key in (ord("p"), ord("P")) and rules:
+                pattern = rules[index].pattern
+                end = datetime.utcnow()
+                start = end - timedelta(days=90)
+                txns = (
+                    session.query(Transaction)
+                    .filter(Transaction.timestamp >= start, Transaction.timestamp <= end)
+                    .order_by(Transaction.timestamp.desc())
+                    .all()
+                )
+                matches = [
+                    t.description
+                    for t in txns
+                    if pattern.lower() in t.description.lower()
+                ]
+                if matches:
+                    scroll_menu(
+                        stdscr,
+                        matches,
+                        0,
+                        header=f"Matches for '{pattern}'",
+                        boxed=True,
+                    )
+                else:
+                    toast(stdscr, "No matches")
+            elif key in (ord("q"), ord("Q"), 27):
+                break
+    session.close()
+
+
+def irregular_menu(stdscr) -> None:
+    """Manage irregular spending categories."""
+
+    global IRREG_MODE, IRREG_QUANTILE
+    session = SessionLocal()
+    index = 0
+    with temp_cursor(0), keypad_mode(stdscr):
+        while True:
+            cats = categories(session)
+            name_w = max((len(c.name) for c in cats), default=0)
+            entries = [
+                f"{c.name:<{name_w}} | {c.window_days:>3} | {c.alpha:.2f} | {c.safety_quantile:.2f} | {'Y' if c.active else 'N'}"
+                for c in cats
+            ]
+
+            h, w = stdscr.getmaxyx()
+            h = max(1, h)
+            w = max(1, w)
+            header = "Irregular spending"
+            offset = 1
+            visible = min(len(entries), h - 1 - offset)
+            top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+
+            stdscr.erase()
+            head_x = max(0, (w - len(header)) // 2)
+            try:
+                stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+            except curses.error:
+                pass
+            for i in range(visible):
+                line_idx = top + i
+                if line_idx >= len(entries):
+                    break
+                line = entries[line_idx]
+                attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                try:
+                    stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                except curses.error:
+                    pass
+
+            footer_l = date.today().isoformat()
+            mode_label = (
+                "Deterministic"
+                if IRREG_MODE == "deterministic"
+                else ("MC P50" if IRREG_QUANTILE == "p50" else "MC P80")
+            )
+            pos = f"{index + 1}/{len(entries)}" if entries else "0/0"
+            footer_r = f"{mode_label} {pos}".strip()
+            try:
+                stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
+                stdscr.addnstr(
+                    h - 1,
+                    max(0, w - len(footer_r)),
+                    footer_r,
+                    len(footer_r),
+                )
+            except curses.error:
+                pass
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                curses.resize_term(0, 0)
+                stdscr.clearok(True)
+                continue
+            if key == curses.KEY_UP and index > 0:
+                index -= 1
+            elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                index += 1
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - visible)
+            elif key == curses.KEY_NPAGE:
+                index = min(len(entries) - 1, index + visible)
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(entries) - 1
+            elif key in (ord("a"), ord("A")):
+                edit_irregular_category(stdscr, session, None)
+                session.close()
+                session = SessionLocal()
+            elif key in (ord("e"), ord("E")) and cats:
+                edit_irregular_category(stdscr, session, cats[index])
+                session.close()
+                session = SessionLocal()
+            elif key in (ord("r"), ord("R")) and cats:
+                irregular_rules_menu(stdscr, cats[index])
+            elif key in (ord("l"), ord("L")) and cats:
+                days_str = text(stdscr, "Days to look back", default="120")
+                if days_str is not None:
+                    try:
+                        days = int(days_str)
+                    except ValueError:
+                        days = 0
+                    if days > 0:
+                        end = date.today()
+                        start = end - timedelta(days=days)
+                        state = learn_irregular_state(session, cats[index].id, start, end)
+                        avg = state.avg_gap_days or 0.0
+                        med = state.median_amount or 0.0
+                        toast(stdscr, f"{avg:.1f}d gap, {med:.2f} amt")
+                        session.close()
+                        session = SessionLocal()
+            elif key in (ord("t"), ord("T")):
+                if IRREG_MODE == "deterministic":
+                    IRREG_MODE = "monte_carlo"
+                    IRREG_QUANTILE = "p50"
+                elif IRREG_QUANTILE == "p50":
+                    IRREG_QUANTILE = "p80"
+                else:
+                    IRREG_MODE = "deterministic"
+                    IRREG_QUANTILE = "p80"
+            elif key in (ord("q"), ord("Q"), 27):
+                break
+    session.close()
 
 
 def goals_curses(stdscr, entries, index, header=None, footer_right=""):
@@ -1213,9 +1722,11 @@ def main(stdscr) -> None:
                     "List transactions",
                     "Edit bills",
                     "Edit income",
+                    "Irregular spending",
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
+                    "Settings/Help",
                     "Quit",
                 ],
                 boxed=False,
@@ -1226,12 +1737,16 @@ def main(stdscr) -> None:
                 edit_recurring(stdscr, False)
             elif choice == "Edit income":
                 edit_recurring(stdscr, True)
+            elif choice == "Irregular spending":
+                irregular_menu(stdscr)
             elif choice == "Ledger":
                 ledger_view(stdscr)
             elif choice == "Set balance":
                 set_balance(stdscr)
             elif choice == "Wants/Goals":
                 wants_goals_menu(stdscr)
+            elif choice == "Settings/Help":
+                settings_help_menu(stdscr)
             else:
                 break
 
