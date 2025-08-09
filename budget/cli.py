@@ -890,6 +890,9 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             t.timestamp.date(),
             classify_priority(t)[0],
             classify_priority(t)[1],
+            getattr(t, "id", 0),
+            t.description or "",
+            float(f"{abs(t.amount):.2f}"),
             t.timestamp,
         )
     )
