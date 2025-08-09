@@ -51,6 +51,8 @@ INITIAL_FORWARD_MONTHS = 18
 EXTEND_CHUNK_MONTHS = 6
 EDGE_TRIGGER_DAYS = 14
 
+CURRENT_ACCOUNT_IDS: list[int] | None = None  # None means "All Accounts"
+
 
 def select(stdscr, message, choices, default=None, boxed=True):
     """Display a scrollable menu and return the selected value.
@@ -89,6 +91,23 @@ def select(stdscr, message, choices, default=None, boxed=True):
     if selected is None:
         return None
     return values[selected]
+
+
+def list_accounts(session):
+    return (
+        session.query(Account)
+        .filter(Account.archived == False)
+        .order_by(Account.name)
+        .all()
+    )
+
+
+def pick_account(stdscr, session, prompt="Select account"):
+    accts = list_accounts(session)
+    if not accts:
+        return None
+    choice = select(stdscr, prompt, [(a.name, a) for a in accts])
+    return choice
 
 
 def _center_box(stdscr, height: int, width: int) -> "curses.window":
@@ -406,18 +425,72 @@ def max_payment_today_menu(stdscr) -> None:
     toast(stdscr, f"You can safely pay ${amt:.2f} to {target.name} today.")
 
 
-def choose_account_scope(stdscr, current: list[int]) -> list[int] | None:
+def accounts_menu(stdscr) -> None:
+    global CURRENT_ACCOUNT_IDS
     session = SessionLocal()
-    accounts = (
-        session.query(Account)
-        .filter(Account.archived == False)
-        .order_by(Account.name)
-        .all()
-    )
-    session.close()
-    all_ids = [a.id for a in accounts]
-    choices = [("All accounts", all_ids)] + [(a.name, [a.id]) for a in accounts]
-    return select(stdscr, "Accounts", choices, default=current)
+    ensure_default_account(session)
+    try:
+        while True:
+            choice = select(
+                stdscr,
+                "Accounts",
+                [
+                    "All Accounts",
+                    "New Account",
+                    "Rename Account",
+                    "Delete Account",
+                    "Select Single Account",
+                    "Back",
+                ],
+                boxed=False,
+            )
+            if choice == "All Accounts":
+                CURRENT_ACCOUNT_IDS = None
+            elif choice == "New Account":
+                name = text(stdscr, "Account name")
+                if name is None:
+                    continue
+                acc_type = select(
+                    stdscr,
+                    "Account type",
+                    ["checking", "savings", "credit_card", "loan"],
+                )
+                if acc_type is None:
+                    continue
+                session.add(Account(name=name, type=acc_type))
+                session.commit()
+            elif choice == "Rename Account":
+                acct = pick_account(stdscr, session, "Rename which account")
+                if acct:
+                    new_name = text(stdscr, "New name", acct.name)
+                    if new_name is not None:
+                        acct.name = new_name
+                        session.commit()
+            elif choice == "Delete Account":
+                acct = pick_account(stdscr, session, "Delete which account")
+                if acct:
+                    has_tx = (
+                        session.query(Transaction)
+                        .filter_by(account_id=acct.id)
+                        .first()
+                        is not None
+                    )
+                    if has_tx and not confirm(
+                        stdscr, "Account has transactions; delete anyway?"
+                    ):
+                        continue
+                    session.delete(acct)
+                    session.commit()
+                    if CURRENT_ACCOUNT_IDS and acct.id in CURRENT_ACCOUNT_IDS:
+                        CURRENT_ACCOUNT_IDS = None
+            elif choice == "Select Single Account":
+                acct = pick_account(stdscr, session, "Select account")
+                if acct:
+                    CURRENT_ACCOUNT_IDS = [acct.id]
+            else:
+                break
+    finally:
+        session.close()
 
 
 def add_recurring(stdscr, is_income: bool, existing: Recurring | None = None) -> None:
@@ -1452,15 +1525,27 @@ def scroll_menu(
                 return None
 
 
-def ledger_view(stdscr, account_scope: list[int] | None = None) -> None:
+def ledger_view(stdscr) -> None:
     """Display a scrollable ledger as ``date | name | amount | balance``."""
     session = SessionLocal()
-    default_acc = ensure_default_account(session)
-    if account_scope is None:
-        account_scope = [default_acc.id]
-    accounts = session.query(Account).filter(Account.id.in_(account_scope)).all()
+    ensure_default_account(session)
+    account_ids = CURRENT_ACCOUNT_IDS
+    if account_ids is None:
+        accounts = (
+            session.query(Account)
+            .filter(Account.archived == False)
+            .order_by(Account.name)
+            .all()
+        )
+        account_ids = [a.id for a in accounts]
+    else:
+        accounts = session.query(Account).filter(Account.id.in_(account_ids)).all()
+    if not account_ids:
+        default_acc = ensure_default_account(session)
+        account_ids = [default_acc.id]
+        accounts = [default_acc]
     bal_amt = 0.0
-    for aid in account_scope:
+    for aid in account_ids:
         bal = (
             session.query(Balance)
             .filter(Balance.account_id == aid)
@@ -1472,7 +1557,7 @@ def ledger_view(stdscr, account_scope: list[int] | None = None) -> None:
 
     earliest_tx = (
         session.query(Transaction)
-        .filter(Transaction.account_id.in_(account_scope))
+        .filter(Transaction.account_id.in_(account_ids))
         .order_by(Transaction.timestamp)
         .first()
     )
@@ -1481,7 +1566,7 @@ def ledger_view(stdscr, account_scope: list[int] | None = None) -> None:
     plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
     account_names = {a.id: a.name for a in accounts}
 
-    rows = list(ledger_rows(session, plan_start, plan_end, account_scope))
+    rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
     if not rows:
         session.close()
         return
@@ -1495,7 +1580,7 @@ def ledger_view(stdscr, account_scope: list[int] | None = None) -> None:
 
     def rebuild():
         nonlocal rows, ts_list
-        rows = list(ledger_rows(session, plan_start, plan_end, account_scope))
+        rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
         ts_list = [r.timestamp for r in rows]
 
     def refresh(ts_current: datetime):
@@ -1536,7 +1621,7 @@ def ledger_view(stdscr, account_scope: list[int] | None = None) -> None:
         get_next,
         bal_amt,
         account_names,
-        len(account_scope) > 1,
+        len(account_ids) > 1,
     )
     session.close()
 
@@ -2021,12 +2106,11 @@ def main(stdscr) -> None:
         session = SessionLocal()
         try:
             try:
-                default_acc_id = ensure_default_account(session).id
+                ensure_default_account(session)
             except OperationalError:
-                default_acc_id = 1
+                pass
         finally:
             session.close()
-        account_scope = [default_acc_id]
         while True:
             choice = select(
                 stdscr,
@@ -2038,7 +2122,7 @@ def main(stdscr) -> None:
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
-                    "Accounts",
+                    "Accounts...",
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
@@ -2059,12 +2143,10 @@ def main(stdscr) -> None:
                 edit_recurring(stdscr, True)
             elif choice == "Irregular spending":
                 irregular_menu(stdscr)
-            elif choice == "Accounts":
-                new_scope = choose_account_scope(stdscr, account_scope)
-                if new_scope is not None:
-                    account_scope = new_scope
+            elif choice == "Accounts...":
+                accounts_menu(stdscr)
             elif choice == "Ledger":
-                ledger_view(stdscr, account_scope)
+                ledger_view(stdscr)
             elif choice == "Set balance":
                 set_balance(stdscr)
             elif choice == "Wants/Goals":
