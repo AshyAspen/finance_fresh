@@ -43,6 +43,10 @@ FREQUENCIES = [
 IRREG_MODE = "monte_carlo"
 IRREG_QUANTILE = "p80"
 
+INITIAL_FORWARD_MONTHS = 18
+EXTEND_CHUNK_MONTHS = 6
+EDGE_TRIGGER_DAYS = 14
+
 
 def select(stdscr, message, choices, default=None, boxed=True):
     """Display a scrollable menu and return the selected value.
@@ -802,15 +806,29 @@ class LedgerRow:
         return self.timestamp.date()
 
 
-def ledger_rows(session):
+def add_months(d: date, months: int) -> date:
+    year = d.year + (d.month - 1 + months) // 12
+    month = (d.month - 1 + months) % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def end_of_month(d: date, months: int = 0) -> date:
+    d = add_months(d, months)
+    last = calendar.monthrange(d.year, d.month)[1]
+    return date(d.year, d.month, last)
+
+
+def ledger_rows(session, plan_start: date | None = None, plan_end: date | None = None):
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
     bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
 
-    earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
-    earliest_date = earliest_tx.timestamp.date() if earliest_tx else bal_ts.date()
-    plan_start = min(earliest_date, bal_ts.date())
-    plan_end = date.today() + timedelta(days=3650)  # ~10 years
+    if plan_start is None or plan_end is None:
+        earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
+        earliest_date = earliest_tx.timestamp.date() if earliest_tx else bal_ts.date()
+        plan_start = min(earliest_date, bal_ts.date())
+        plan_end = date.today() + timedelta(days=3650)  # ~10 years
 
     # real transactions
     txns = session.query(Transaction).order_by(Transaction.timestamp).all()
@@ -1155,9 +1173,15 @@ def ledger_view(stdscr) -> None:
     session = SessionLocal()
     bal = session.get(Balance, 1)
     bal_amt = bal.amount if bal else 0.0
-    rows = list(ledger_rows(session))
-    session.close()
+
+    earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
+    earliest_date = earliest_tx.timestamp.date() if earliest_tx else date.today()
+    plan_start = earliest_date
+    plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
+
+    rows = list(ledger_rows(session, plan_start, plan_end))
     if not rows:
+        session.close()
         return
 
     ts_list = [r.timestamp for r in rows]
@@ -1167,7 +1191,16 @@ def ledger_view(stdscr) -> None:
         start_idx = 0
     initial_row = rows[start_idx]
 
+    def rebuild():
+        nonlocal rows, ts_list
+        rows = list(ledger_rows(session, plan_start, plan_end))
+        ts_list = [r.timestamp for r in rows]
+
     def get_prev(ts_before):
+        nonlocal plan_start
+        if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
+            plan_start = add_months(plan_start, -EXTEND_CHUNK_MONTHS)
+            rebuild()
         idx = bisect_left(ts_list, ts_before) - 1
         if idx >= 0:
             r = rows[idx]
@@ -1175,6 +1208,10 @@ def ledger_view(stdscr) -> None:
         return None
 
     def get_next(ts_after):
+        nonlocal plan_end
+        if (plan_end - ts_after.date()).days <= EDGE_TRIGGER_DAYS:
+            plan_end = end_of_month(plan_end, EXTEND_CHUNK_MONTHS)
+            rebuild()
         idx = bisect_right(ts_list, ts_after)
         if idx < len(rows):
             r = rows[idx]
@@ -1182,6 +1219,7 @@ def ledger_view(stdscr) -> None:
         return None
 
     ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt)
+    session.close()
 
 
 def irregular_category_form(
