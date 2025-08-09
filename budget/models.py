@@ -118,7 +118,13 @@ class IrregularCategory(Base):
     window_days = Column(Integer, default=120)
     alpha = Column(Float, default=0.3)
     safety_quantile = Column(Float, default=0.8)
-    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
+    account_id = Column(
+        Integer,
+        ForeignKey("accounts.id"),
+        nullable=False,
+        index=True,
+        default=1,
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -171,6 +177,13 @@ class IrregularRule(Base):
     id = Column(Integer, primary_key=True)
     category_id = Column(
         Integer, ForeignKey("irregular_categories.id"), nullable=False, index=True
+    )
+    account_id = Column(
+        Integer,
+        ForeignKey("accounts.id"),
+        nullable=False,
+        index=True,
+        default=1,
     )
     pattern = Column(String, nullable=False)
     active = Column(Boolean, default=True)

@@ -35,9 +35,11 @@ def ensure_default_account(session) -> "Account":
     session.commit()
     return acc
 
+
 def init_db() -> None:
     """Create database tables if they do not exist."""
     from . import models  # noqa: F401
+
     insp = inspect(engine)
     required = {
         "accounts",
@@ -108,7 +110,9 @@ def init_db() -> None:
             )
 
         # Ensure irregular category columns and indexes
-        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(irregular_categories)"))]
+        cols = [
+            r[1] for r in conn.execute(text("PRAGMA table_info(irregular_categories)"))
+        ]
         if "active" not in cols:
             conn.execute(
                 text(
@@ -139,17 +143,23 @@ def init_db() -> None:
                     "ALTER TABLE irregular_categories ADD COLUMN account_id INTEGER REFERENCES accounts(id)"
                 )
             )
+        conn.execute(
+            text(
+                f"UPDATE irregular_categories SET account_id = {default_id} WHERE account_id IS NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_irregular_categories_account_id ON irregular_categories(account_id)"
+            )
+        )
         if "created_at" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_categories ADD COLUMN created_at DATETIME"
-                )
+                text("ALTER TABLE irregular_categories ADD COLUMN created_at DATETIME")
             )
         if "updated_at" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_categories ADD COLUMN updated_at DATETIME"
-                )
+                text("ALTER TABLE irregular_categories ADD COLUMN updated_at DATETIME")
             )
         conn.execute(
             text(
@@ -167,45 +177,29 @@ def init_db() -> None:
             )
         if "avg_gap_days" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_state ADD COLUMN avg_gap_days FLOAT"
-                )
+                text("ALTER TABLE irregular_state ADD COLUMN avg_gap_days FLOAT")
             )
         if "weekday_probs" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_state ADD COLUMN weekday_probs TEXT"
-                )
+                text("ALTER TABLE irregular_state ADD COLUMN weekday_probs TEXT")
             )
         if "amount_mu" not in cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE irregular_state ADD COLUMN amount_mu FLOAT"
-                )
-            )
+            conn.execute(text("ALTER TABLE irregular_state ADD COLUMN amount_mu FLOAT"))
         if "amount_sigma" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_state ADD COLUMN amount_sigma FLOAT"
-                )
+                text("ALTER TABLE irregular_state ADD COLUMN amount_sigma FLOAT")
             )
         if "median_amount" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_state ADD COLUMN median_amount FLOAT"
-                )
+                text("ALTER TABLE irregular_state ADD COLUMN median_amount FLOAT")
             )
         if "last_event_at" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_state ADD COLUMN last_event_at DATETIME"
-                )
+                text("ALTER TABLE irregular_state ADD COLUMN last_event_at DATETIME")
             )
         if "updated_at" not in cols:
             conn.execute(
-                text(
-                    "ALTER TABLE irregular_state ADD COLUMN updated_at DATETIME"
-                )
+                text("ALTER TABLE irregular_state ADD COLUMN updated_at DATETIME")
             )
         conn.execute(
             text(
@@ -222,17 +216,34 @@ def init_db() -> None:
                 )
             )
         if "pattern" not in cols:
-            conn.execute(
-                text("ALTER TABLE irregular_rules ADD COLUMN pattern TEXT")
-            )
+            conn.execute(text("ALTER TABLE irregular_rules ADD COLUMN pattern TEXT"))
         if "active" not in cols:
             conn.execute(
+                text("ALTER TABLE irregular_rules ADD COLUMN active BOOLEAN DEFAULT 1")
+            )
+        if "account_id" not in cols:
+            conn.execute(
                 text(
-                    "ALTER TABLE irregular_rules ADD COLUMN active BOOLEAN DEFAULT 1"
+                    "ALTER TABLE irregular_rules ADD COLUMN account_id INTEGER REFERENCES accounts(id)"
+                )
+            )
+            conn.execute(
+                text(
+                    "UPDATE irregular_rules SET account_id = (SELECT account_id FROM irregular_categories WHERE irregular_categories.id = irregular_rules.category_id)"
+                )
+            )
+            conn.execute(
+                text(
+                    f"UPDATE irregular_rules SET account_id = {default_id} WHERE account_id IS NULL"
                 )
             )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_irregular_rules_category_pattern ON irregular_rules(category_id, pattern)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_irregular_rules_account_id ON irregular_rules(account_id)"
             )
         )

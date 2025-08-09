@@ -1,4 +1,5 @@
 """Command-line interface for budget app."""
+
 from __future__ import annotations
 
 from datetime import datetime, date, timedelta
@@ -184,6 +185,7 @@ def show_key_help(stdscr, bindings):
             pass
         win.getch()
 
+
 def text(stdscr, message, default=None):
     with temp_cursor(1), keypad_mode(stdscr):
         h, w = stdscr.getmaxyx()
@@ -250,9 +252,7 @@ def toast(stdscr, msg: str, ms: int = 900):
         curses.napms(ms)
 
 
-def transaction_form(
-    stdscr, description: str, timestamp: datetime, amount: float
-):
+def transaction_form(stdscr, description: str, timestamp: datetime, amount: float):
     """Interactive form for editing transaction fields.
 
     Returns ``(description, timestamp, amount)`` if saved, otherwise ``None``.
@@ -277,8 +277,7 @@ def transaction_form(
                 description = new_desc
         elif choice == "date":
             date_str = text(
-                stdscr,
-                "Date (YYYY-MM-DD)", default=timestamp.strftime("%Y-%m-%d")
+                stdscr, "Date (YYYY-MM-DD)", default=timestamp.strftime("%Y-%m-%d")
             )
             if date_str is not None:
                 try:
@@ -309,7 +308,7 @@ def add_transaction(stdscr) -> None:
     session.add(txn)
     session.commit()
 
-    category_id = match_category_id(session, txn.description)
+    category_id = match_category_id(session, txn.description, txn.account_id)
     if category_id is not None:
         state = get_or_create_state(session, category_id)
         update_irregular_state(state, txn)
@@ -406,8 +405,7 @@ def goal_form(
                 description = new_desc
         elif choice == "date":
             date_str = text(
-                stdscr,
-                "Date (YYYY-MM-DD)", default=target_date.strftime("%Y-%m-%d")
+                stdscr, "Date (YYYY-MM-DD)", default=target_date.strftime("%Y-%m-%d")
             )
             if date_str is not None:
                 try:
@@ -480,7 +478,11 @@ def edit_recurring(stdscr, is_income: bool) -> None:
         amt_w = max((len(f"{r.amount:.2f}") for r in recs), default=0)
         entries = []
         for r in recs:
-            anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+            anchor = (
+                r.start_date.date()
+                if isinstance(r.start_date, datetime)
+                else r.start_date
+            )
             next_occ = occurrences_between(
                 anchor, r.frequency, date.today(), date.today() + timedelta(days=365)
             )
@@ -773,7 +775,9 @@ def next_event(after: datetime, txns, recs):
     for i, r in enumerate(recs):
         occ = occurrence_on_or_before(r.start_date.date(), r.frequency, after.date())
         if occ is not None:
-            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=i)
+            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(
+                microseconds=i
+            )
             if occ_dt > after and (next_rec_time is None or occ_dt < next_rec_time):
                 next_rec_time = occ_dt
                 next_rec = r
@@ -787,7 +791,9 @@ def next_event(after: datetime, txns, recs):
             next_rec = r
     if next_txn is None and next_rec is None:
         return None
-    if next_txn is not None and (next_rec_time is None or next_txn.timestamp <= next_rec_time):
+    if next_txn is not None and (
+        next_rec_time is None or next_txn.timestamp <= next_rec_time
+    ):
         return next_txn.timestamp, next_txn.description, next_txn.amount
     return next_rec_time, next_rec.description, next_rec.amount
 
@@ -803,20 +809,26 @@ def prev_event(before: datetime, txns, recs):
     for i, r in enumerate(recs):
         occ = occurrence_on_or_before(r.start_date.date(), r.frequency, before.date())
         if occ is not None:
-            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=i)
+            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(
+                microseconds=i
+            )
             if occ_dt >= before:
                 occ_prev = occurrence_on_or_before(
                     r.start_date.date(), r.frequency, before.date() - timedelta(days=1)
                 )
                 if occ_prev is None:
                     continue
-                occ_dt = datetime.combine(occ_prev, datetime.min.time()) + timedelta(microseconds=i)
+                occ_dt = datetime.combine(occ_prev, datetime.min.time()) + timedelta(
+                    microseconds=i
+                )
             if occ_dt < before and (prev_rec_time is None or occ_dt > prev_rec_time):
                 prev_rec_time = occ_dt
                 prev_rec = r
     if prev_txn is None and prev_rec is None:
         return None
-    if prev_txn is not None and (prev_rec_time is None or prev_txn.timestamp >= prev_rec_time):
+    if prev_txn is not None and (
+        prev_rec_time is None or prev_txn.timestamp >= prev_rec_time
+    ):
         return prev_txn.timestamp, prev_txn.description, prev_txn.amount
     return prev_rec_time, prev_rec.description, prev_rec.amount
 
@@ -876,7 +888,11 @@ def ledger_rows(
             .first()
         )
         amt = row.amount if row else 0.0
-        ts = row.timestamp if row and row.timestamp else datetime.combine(date.today(), datetime.min.time())
+        ts = (
+            row.timestamp
+            if row and row.timestamp
+            else datetime.combine(date.today(), datetime.min.time())
+        )
         bal_map[aid] = (amt, ts)
 
     min_bal_date = min(ts.date() for _, ts in bal_map.values())
@@ -899,14 +915,12 @@ def ledger_rows(
         .all()
     )
 
-    recs = (
-        session.query(Recurring)
-        .filter(Recurring.account_id.in_(account_ids))
-        .all()
-    )
+    recs = session.query(Recurring).filter(Recurring.account_id.in_(account_ids)).all()
     synthetic_txns: list[Transaction] = []
     for r in recs:
-        anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+        anchor = (
+            r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+        )
         occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
         for occ in occs:
             synthetic_txns.append(
@@ -921,12 +935,12 @@ def ledger_rows(
 
     irr_start = max(date.today(), min_bal_date)
     irr_series: list[Transaction] = []
-    default_acc = ensure_default_account(session)
-    if default_acc.id in account_ids:
+    for aid in account_ids:
         irr_forecast = irregular_daily_series(
             session,
             irr_start,
             plan_end,
+            account_id=aid,
             mode=IRREG_MODE,
             quantile=IRREG_QUANTILE,
         )
@@ -937,7 +951,7 @@ def ledger_rows(
                         description="Irregular",
                         amount=-amt,
                         timestamp=datetime.combine(d, datetime.min.time()),
-                        account_id=default_acc.id,
+                        account_id=aid,
                     )
                 )
     txns.extend(irr_series)
@@ -994,6 +1008,7 @@ def ledger_rows(
     for t in txns:
         if not (plan_start <= t.timestamp.date() <= plan_end):
             continue
+        assert t.account_id in account_ids
         if t.timestamp == last_ts:
             bump += 1
         else:
@@ -1211,20 +1226,26 @@ def scroll_menu(
                         except curses.error:
                             pass
 
-                    top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+                    top = min(
+                        max(0, index - visible // 2), max(0, len(entries) - visible)
+                    )
                     for i in range(visible):
                         line_idx = top + i
                         if line_idx >= len(entries):
                             break
                         line = entries[line_idx]
-                        attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                        attr = (
+                            curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                        )
                         try:
                             win.addnstr(1 + offset + i, 2, line, content_width, attr)
                         except curses.error:
                             pass
 
                     try:
-                        win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
+                        win.addnstr(
+                            total_height - 2, 2, footer_l, max(0, content_width)
+                        )
                         win.addnstr(
                             total_height - 2,
                             2 + max(0, content_width - len(footer_r_text)),
@@ -1530,7 +1551,9 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
                 pattern = text(stdscr, "Pattern")
                 if pattern:
                     session.add(
-                        IrregularRule(category_id=category.id, pattern=pattern, active=True)
+                        IrregularRule(
+                            category_id=category.id, pattern=pattern, active=True
+                        )
                     )
                     session.commit()
             elif key in (ord("d"), ord("D")) and rules:
@@ -1545,7 +1568,9 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
                 start = end - timedelta(days=90)
                 txns = (
                     session.query(Transaction)
-                    .filter(Transaction.timestamp >= start, Transaction.timestamp <= end)
+                    .filter(
+                        Transaction.timestamp >= start, Transaction.timestamp <= end
+                    )
                     .order_by(Transaction.timestamp.desc())
                     .all()
                 )
@@ -1680,7 +1705,9 @@ def irregular_menu(stdscr) -> None:
                     if days > 0:
                         end = date.today()
                         start = end - timedelta(days=days)
-                        state = learn_irregular_state(session, cats[index].id, start, end)
+                        state = learn_irregular_state(
+                            session, cats[index].id, start, end
+                        )
                         avg = state.avg_gap_days or 0.0
                         med = state.median_amount or 0.0
                         toast(stdscr, f"{avg:.1f}d gap, {med:.2f} amt")
