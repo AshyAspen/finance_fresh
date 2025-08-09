@@ -904,6 +904,12 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             total_before += t.amount
     offset = bal_amt - total_before
 
+    def effective_amount(t):
+        # For dates on/before bal_ts, ignore synthetic (recurring/irregular) amounts.
+        if t.timestamp <= bal_ts and not is_posted(t):
+            return 0.0
+        return t.amount
+
     running = 0.0
     last_ts: datetime | None = None
     bump = 0
@@ -915,7 +921,7 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
         else:
             last_ts = t.timestamp
             bump = 0
-        running += t.amount
+        running += effective_amount(t)
         yield LedgerRow(
             t.timestamp + timedelta(microseconds=bump),
             t.description,
