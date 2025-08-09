@@ -18,6 +18,7 @@ from .models import (
     Balance,
     Recurring,
     Goal,
+    Account,
     IrregularCategory,
     IrregularRule,
     IrregularState,
@@ -30,7 +31,7 @@ from .services_irregular import (
     update_irregular_state,
     get_or_create_state,
 )
-from .services import occurrences_between
+from .services import occurrences_between, create_transfer
 
 FREQUENCIES = [
     "weekly",
@@ -322,6 +323,53 @@ def add_transaction(stdscr) -> None:
                 f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
             )
 
+    session.close()
+
+
+def add_transfer(stdscr) -> None:
+    """Prompt user for transfer details and persist it."""
+
+    session = SessionLocal()
+    accounts = session.query(Account).filter(Account.archived == False).all()
+    if len(accounts) < 2:
+        session.close()
+        return
+
+    from_name = select(stdscr, "From account", [a.name for a in accounts])
+    if from_name is None:
+        session.close()
+        return
+    from_acc = next(a for a in accounts if a.name == from_name)
+
+    dest_choices = [a.name for a in accounts if a.id != from_acc.id]
+    to_name = select(stdscr, "To account", dest_choices)
+    if to_name is None:
+        session.close()
+        return
+    to_acc = next(a for a in accounts if a.name == to_name)
+
+    amt_str = text(stdscr, "Amount")
+    if amt_str is None:
+        session.close()
+        return
+    try:
+        amount = float(amt_str)
+    except ValueError:
+        session.close()
+        return
+
+    date_str = text(
+        stdscr, "Date (YYYY-MM-DD)", default=datetime.utcnow().strftime("%Y-%m-%d")
+    )
+    if date_str is None:
+        session.close()
+        return
+    try:
+        when = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        when = datetime.utcnow()
+
+    create_transfer(session, from_acc.id, to_acc.id, amount, when)
     session.close()
 
 
@@ -1898,6 +1946,7 @@ def main(stdscr) -> None:
                 "Select an option",
                 choices=[
                     "List transactions",
+                    "New transfer",
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
@@ -1911,6 +1960,8 @@ def main(stdscr) -> None:
             )
             if choice == "List transactions":
                 list_transactions(stdscr)
+            elif choice == "New transfer":
+                add_transfer(stdscr)
             elif choice == "Edit bills":
                 edit_recurring(stdscr, False)
             elif choice == "Edit income":

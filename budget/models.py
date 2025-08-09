@@ -46,6 +46,13 @@ class Transaction(Base):
         nullable=False,
         default=1,
     )
+    transfer_group_id = Column(String, nullable=True, index=True)
+    counterparty_account_id = Column(
+        Integer,
+        ForeignKey("accounts.id"),
+        nullable=True,
+        index=True,
+    )
 
 
 class Balance(Base):
