@@ -1,5 +1,6 @@
 import itertools
 from datetime import datetime, date, timedelta
+import pytest
 
 from tests.helpers import get_temp_session
 from budget import cli
@@ -537,8 +538,8 @@ def test_per_account_offsets_match_stored_balance():
         for r in rows:
             if r.account_id in bal_ts and r.date <= bal_ts[r.account_id]:
                 last_by_acct[r.account_id] = r
-        assert abs(last_by_acct[a1.id].running_account - 100.0) < 0.01
-        assert abs(last_by_acct[a2.id].running_account - 200.0) < 0.01
+        assert last_by_acct[a1.id].running_account == pytest.approx(100.0, abs=0.01)
+        assert last_by_acct[a2.id].running_account == pytest.approx(200.0, abs=0.01)
     finally:
         session.close()
         path.unlink()
