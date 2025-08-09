@@ -4,6 +4,7 @@ from datetime import datetime, date
 from tests.helpers import get_temp_session
 from budget import cli
 from budget.models import Transaction, Balance, Recurring
+from budget.services import occurrences_between
 
 
 def test_ledger_running_balance():
@@ -236,6 +237,126 @@ def test_ledger_view_displays_all_events(monkeypatch):
             "Lunch",
         ]
     finally:
+        path.unlink()
+
+
+def test_ledger_window_overlap():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+                Transaction(
+                    description="Deposit",
+                    amount=100.0,
+                    timestamp=datetime(2023, 1, 5),
+                ),
+            ]
+        )
+        session.commit()
+        start = date(2023, 1, 1)
+        rows_a = list(cli.ledger_rows(session, start, date(2023, 3, 31)))
+        session.close()
+        session = Session()
+        rows_b = list(cli.ledger_rows(session, start, date(2023, 6, 30)))
+        rows_b_trim = [r for r in rows_b if r.date <= date(2023, 3, 31)]
+        assert [
+            (r.date, r.description, r.amount, r.running) for r in rows_a
+        ] == [
+            (r.date, r.description, r.amount, r.running) for r in rows_b_trim
+        ]
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_daily_delta_matches_running_balance():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(
+                    description="T1",
+                    amount=100.0,
+                    timestamp=datetime(2023, 1, 1, 10),
+                ),
+                Transaction(
+                    description="T2",
+                    amount=-20.0,
+                    timestamp=datetime(2023, 1, 1, 12),
+                ),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 2),
+                    frequency="weekly",
+                ),
+            ]
+        )
+        session.commit()
+        rows = list(cli.ledger_rows(session, date(2023, 1, 1), date(2023, 1, 10)))
+        by_day: dict[date, list[cli.LedgerRow]] = {}
+        for r in rows:
+            by_day.setdefault(r.date, []).append(r)
+        prev = rows[0].running - rows[0].amount
+        for day in sorted(by_day):
+            day_rows = by_day[day]
+            amounts = sum(r.amount for r in day_rows)
+            start_bal = prev
+            end_bal = day_rows[-1].running
+            assert end_bal - start_bal == amounts
+            prev = end_bal
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_recurring_occurrence_counts():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(id=1, amount=0.0, timestamp=datetime(2023, 1, 1)),
+                Recurring(
+                    description="Rent",
+                    amount=-50.0,
+                    start_date=datetime(2023, 1, 1),
+                    frequency="monthly",
+                ),
+                Recurring(
+                    description="Gym",
+                    amount=-20.0,
+                    start_date=datetime(2023, 1, 5),
+                    frequency="weekly",
+                ),
+            ]
+        )
+        session.commit()
+        start = date(2023, 1, 1)
+        end = date(2023, 2, 28)
+        rows = list(cli.ledger_rows(session, start, end))
+        counts = {"Rent": 0, "Gym": 0}
+        for r in rows:
+            if r.description in counts:
+                counts[r.description] += 1
+        assert counts["Rent"] == len(
+            occurrences_between(date(2023, 1, 1), "monthly", start, end)
+        )
+        assert counts["Gym"] == len(
+            occurrences_between(date(2023, 1, 5), "weekly", start, end)
+        )
+    finally:
+        session.close()
         path.unlink()
 
 
