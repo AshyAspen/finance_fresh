@@ -475,18 +475,19 @@ def max_payment_today_menu(stdscr) -> None:
         return
     target = next(a for a in accounts if a.name == target_name)
 
-    buffer_by_account: dict[int, float] = {}
-    for acc in accounts:
-        buf_str = text(stdscr, f"Buffer for {acc.name}", default="100")
-        if buf_str is None:
-            session.close()
-            return
-        try:
-            buffer_by_account[acc.id] = float(buf_str)
-        except ValueError:
-            buffer_by_account[acc.id] = 0.0
+    buf_str = text(stdscr, "Buffer per account", default="100")
+    if buf_str is None:
+        session.close()
+        return
+    try:
+        buf_val = float(buf_str)
+    except ValueError:
+        buf_val = 0.0
+    buffer_by_account = {acc.id: buf_val for acc in accounts}
 
-    amt = max_safe_payment_today(session, target.id, buffer_by_account)
+    amt = max_safe_payment_today(
+        session, target.id, buffer_by_account, horizon_days=120
+    )
     session.close()
     toast(stdscr, f"You can safely pay ${amt:.2f} to {target.name} today.")
 
@@ -2335,7 +2336,7 @@ def main(stdscr) -> None:
                 choices=[
                     "List transactions",
                     "New Transfer",
-                    "Max safe payment (today)",
+                    "Max Safe Payment (today)",
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
@@ -2352,7 +2353,7 @@ def main(stdscr) -> None:
                 list_transactions(stdscr)
             elif choice == "New Transfer":
                 add_transfer(stdscr)
-            elif choice == "Max safe payment (today)":
+            elif choice == "Max Safe Payment (today)":
                 max_payment_today_menu(stdscr)
             elif choice == "Edit bills":
                 edit_recurring(stdscr, False)
