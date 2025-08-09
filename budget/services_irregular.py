@@ -27,6 +27,7 @@ def get_or_create_state(session: Session, category_id: int) -> IrregularState:
         session.commit()
     return state
 
+
 def learn_irregular_state(
     session: Session,
     category_id: int,
@@ -57,9 +58,13 @@ def learn_irregular_state(
         raise ValueError(f"Unknown category id {category_id}")
 
     # Clamp start to the category's window
-    end_dt = end if isinstance(end, datetime) else datetime.combine(end, datetime.min.time())
+    end_dt = (
+        end if isinstance(end, datetime) else datetime.combine(end, datetime.min.time())
+    )
     start_dt = (
-        start if isinstance(start, datetime) else datetime.combine(start, datetime.min.time())
+        start
+        if isinstance(start, datetime)
+        else datetime.combine(start, datetime.min.time())
     )
 
     window_start = end_dt - timedelta(days=category.window_days)
@@ -86,7 +91,11 @@ def learn_irregular_state(
         .order_by(Transaction.timestamp)
         .all()
     )
-    txns = [t for t in txns if match_category_id(session, t.description) == category_id]
+    txns = [
+        t
+        for t in txns
+        if match_category_id(session, t.description, t.account_id) == category_id
+    ]
 
     if not txns:
         session.commit()
@@ -143,7 +152,9 @@ def learn_irregular_state(
     return state
 
 
-def update_irregular_state(state: IrregularState, new_tx: Transaction) -> IrregularState:
+def update_irregular_state(
+    state: IrregularState, new_tx: Transaction
+) -> IrregularState:
     """Update an existing irregular ``state`` with a new transaction.
 
     Parameters
@@ -197,6 +208,7 @@ def update_irregular_state(state: IrregularState, new_tx: Transaction) -> Irregu
         sess.commit()
 
     return state
+
 
 def forecast_irregular(
     session: Session,
@@ -287,7 +299,12 @@ def forecast_irregular(
                 .order_by(Transaction.timestamp)
                 .all()
             )
-            txns = [t for t in txns if match_category_id(session, t.description) == category_id]
+            txns = [
+                t
+                for t in txns
+                if match_category_id(session, t.description, t.account_id)
+                == category_id
+            ]
             amounts = [abs(t.amount) for t in txns if abs(t.amount) > 0]
             amount = mean(amounts) if amounts else None
             if amount is None:
@@ -364,10 +381,7 @@ def forecast_irregular(
                     break
                 if current_date < start:
                     continue
-                if (
-                    state.amount_mu is not None
-                    and state.amount_sigma is not None
-                ):
+                if state.amount_mu is not None and state.amount_sigma is not None:
                     amount = random.lognormvariate(state.amount_mu, state.amount_sigma)
                 else:
                     amount = state.median_amount * (1 + random.gauss(0.0, 0.1))
@@ -400,6 +414,7 @@ def irregular_daily_series(
     session: Session,
     start: date,
     end: date,
+    account_id: int | None = None,
     mode: str = "deterministic",
     quantile: str = "p80",
 ) -> list[tuple[date, float]]:
@@ -411,6 +426,9 @@ def irregular_daily_series(
         Database session.
     start, end : date
         Inclusive date range for the forecast.
+    account_id : int, optional
+        Restrict categories to this account. When ``None``, all accounts are
+        considered.
     mode : str, optional
         Forecasting mode passed to :func:`forecast_irregular`. Defaults to
         ``"deterministic"``.
@@ -423,11 +441,10 @@ def irregular_daily_series(
         Sorted daily totals of forecasted amounts.
     """
 
-    cats = (
-        session.query(IrregularCategory)
-        .filter(IrregularCategory.active.is_(True))
-        .all()
-    )
+    cats_q = session.query(IrregularCategory).filter(IrregularCategory.active.is_(True))
+    if account_id is not None:
+        cats_q = cats_q.filter(IrregularCategory.account_id == account_id)
+    cats = cats_q.all()
     totals: dict[date, float] = {}
     for cat in cats:
         forecast = forecast_irregular(session, cat.id, start, end, mode=mode)
@@ -449,11 +466,7 @@ def categories(session: Session) -> list[IrregularCategory]:
     ``active`` flag as needed.
     """
 
-    return (
-        session.query(IrregularCategory)
-        .order_by(IrregularCategory.name)
-        .all()
-    )
+    return session.query(IrregularCategory).order_by(IrregularCategory.name).all()
 
 
 def rules_for(session: Session, category_id: int) -> list[str]:
@@ -469,14 +482,20 @@ def rules_for(session: Session, category_id: int) -> list[str]:
     return [r[0] for r in rows]
 
 
-def match_category_id(session: Session, description: str) -> int | None:
+def match_category_id(
+    session: Session, description: str, account_id: int
+) -> int | None:
     """Return the first matching active category for the description."""
 
     desc = description.lower()
     rules = (
         session.query(IrregularRule)
         .join(IrregularCategory, IrregularRule.category_id == IrregularCategory.id)
-        .filter(IrregularRule.active.is_(True), IrregularCategory.active.is_(True))
+        .filter(
+            IrregularRule.active.is_(True),
+            IrregularRule.account_id == account_id,
+            IrregularCategory.active.is_(True),
+        )
         .order_by(IrregularRule.id)
         .all()
     )

@@ -58,18 +58,14 @@ def test_edit_transaction(monkeypatch):
     Session, path = get_temp_session()
     try:
         session = Session()
-        txn = Transaction(
-            description="Old", amount=5.0, timestamp=datetime(2023, 1, 1)
-        )
+        txn = Transaction(description="Old", amount=5.0, timestamp=datetime(2023, 1, 1))
         session.add(txn)
         session.commit()
 
         monkeypatch.setattr(
             cli, "select", make_prompt(["description", "amount", "date", "save"])
         )
-        monkeypatch.setattr(
-            cli, "text", make_prompt(["New", "10.0", "2023-03-03"])
-        )
+        monkeypatch.setattr(cli, "text", make_prompt(["New", "10.0", "2023-03-03"]))
 
         cli.edit_transaction(object(), session, txn)
         session.refresh(txn)
@@ -102,8 +98,12 @@ def test_list_transactions_columns(monkeypatch):
         session = Session()
         session.add_all(
             [
-                Transaction(description="Short", amount=5.0, timestamp=datetime(2023, 1, 1)),
-                Transaction(description="Longer", amount=-3.0, timestamp=datetime(2023, 1, 2)),
+                Transaction(
+                    description="Short", amount=5.0, timestamp=datetime(2023, 1, 1)
+                ),
+                Transaction(
+                    description="Longer", amount=-3.0, timestamp=datetime(2023, 1, 2)
+                ),
             ]
         )
         session.commit()
@@ -208,7 +208,11 @@ def test_add_transaction_updates_irregular_state(monkeypatch):
         session.add(cat)
         session.commit()
         cat_id = cat.id
-        session.add(IrregularRule(category_id=cat_id, pattern="grocer"))
+        session.add(
+            IrregularRule(
+                category_id=cat_id, account_id=cat.account_id, pattern="grocer"
+            )
+        )
         session.commit()
         session.close()
 

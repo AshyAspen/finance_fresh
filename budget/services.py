@@ -1,7 +1,10 @@
 from __future__ import annotations
 from datetime import date, datetime, timedelta
 import calendar
+import uuid
 from typing import Iterable, Iterator
+
+from .models import Transaction
 
 
 def add_months(d: date, months: int) -> date:
@@ -82,3 +85,35 @@ def occurrences_between(anchor: date, frequency: str, start: date, end: date) ->
         # unknown frequency: return nothing
         return []
     return list(it)
+
+
+def create_transfer(
+    session,
+    from_account_id: int,
+    to_account_id: int,
+    amount: float,
+    when: datetime,
+    description: str = "Transfer",
+):
+    """Create a two-leg transfer between accounts and return the group id."""
+
+    gid = str(uuid.uuid4())
+    t_out = Transaction(
+        account_id=from_account_id,
+        amount=-abs(amount),
+        description=description,
+        timestamp=when,
+        transfer_group_id=gid,
+        counterparty_account_id=to_account_id,
+    )
+    t_in = Transaction(
+        account_id=to_account_id,
+        amount=abs(amount),
+        description=description,
+        timestamp=when,
+        transfer_group_id=gid,
+        counterparty_account_id=from_account_id,
+    )
+    session.add_all([t_out, t_in])
+    session.commit()
+    return gid

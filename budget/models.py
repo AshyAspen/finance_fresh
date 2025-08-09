@@ -46,14 +46,21 @@ class Transaction(Base):
         nullable=False,
         default=1,
     )
+    transfer_group_id = Column(String, nullable=True, index=True)
+    counterparty_account_id = Column(
+        Integer,
+        ForeignKey("accounts.id"),
+        nullable=True,
+        index=True,
+    )
 
 
 class Balance(Base):
-    """Stores the user's current balance."""
+    """Stores balance snapshots per account."""
 
     __tablename__ = "balance"
 
-    id = Column(Integer, primary_key=True, default=1)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     amount = Column(Float, nullable=False, default=0.0)
     timestamp = Column(DateTime, default=datetime.utcnow)
     account_id = Column(
@@ -62,6 +69,10 @@ class Balance(Base):
         index=True,
         nullable=False,
         default=1,
+    )
+
+    __table_args__ = (
+        Index("ix_balance_account_id_timestamp", "account_id", "timestamp"),
     )
 
 
@@ -114,7 +125,13 @@ class IrregularCategory(Base):
     window_days = Column(Integer, default=120)
     alpha = Column(Float, default=0.3)
     safety_quantile = Column(Float, default=0.8)
-    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
+    account_id = Column(
+        Integer,
+        ForeignKey("accounts.id"),
+        nullable=False,
+        index=True,
+        default=1,
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -167,6 +184,13 @@ class IrregularRule(Base):
     id = Column(Integer, primary_key=True)
     category_id = Column(
         Integer, ForeignKey("irregular_categories.id"), nullable=False, index=True
+    )
+    account_id = Column(
+        Integer,
+        ForeignKey("accounts.id"),
+        nullable=False,
+        index=True,
+        default=1,
     )
     pattern = Column(String, nullable=False)
     active = Column(Boolean, default=True)
