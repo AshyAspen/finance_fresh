@@ -31,7 +31,7 @@ from .services_irregular import (
     update_irregular_state,
     get_or_create_state,
 )
-from .services import occurrences_between, create_transfer
+from .services import occurrences_between, create_transfer, max_safe_payment_today
 
 FREQUENCIES = [
     "weekly",
@@ -371,6 +371,39 @@ def add_transfer(stdscr) -> None:
 
     create_transfer(session, from_acc.id, to_acc.id, amount, when)
     session.close()
+
+
+def max_payment_today_menu(stdscr) -> None:
+    """Compute the maximum safe extra payment for today."""
+
+    session = SessionLocal()
+    accounts = (
+        session.query(Account).filter(Account.archived == False).order_by(Account.name).all()
+    )
+    if not accounts:
+        session.close()
+        return
+
+    target_name = select(stdscr, "Target account", [a.name for a in accounts])
+    if target_name is None:
+        session.close()
+        return
+    target = next(a for a in accounts if a.name == target_name)
+
+    buffer_by_account: dict[int, float] = {}
+    for acc in accounts:
+        buf_str = text(stdscr, f"Buffer for {acc.name}", default="100")
+        if buf_str is None:
+            session.close()
+            return
+        try:
+            buffer_by_account[acc.id] = float(buf_str)
+        except ValueError:
+            buffer_by_account[acc.id] = 0.0
+
+    amt = max_safe_payment_today(session, target.id, buffer_by_account)
+    session.close()
+    toast(stdscr, f"You can safely pay ${amt:.2f} to {target.name} today.")
 
 
 def choose_account_scope(stdscr, current: list[int]) -> list[int] | None:
@@ -2001,6 +2034,7 @@ def main(stdscr) -> None:
                 choices=[
                     "List transactions",
                     "New transfer",
+                    "Max safe payment (today)",
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
@@ -2017,6 +2051,8 @@ def main(stdscr) -> None:
                 list_transactions(stdscr)
             elif choice == "New transfer":
                 add_transfer(stdscr)
+            elif choice == "Max safe payment (today)":
+                max_payment_today_menu(stdscr)
             elif choice == "Edit bills":
                 edit_recurring(stdscr, False)
             elif choice == "Edit income":
