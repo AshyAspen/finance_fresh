@@ -1915,7 +1915,14 @@ def ledger_rows(
 
 
 def ledger_curses(
-    stdscr, initial_row, get_prev, get_next, bal_amt, account_names, multi
+    stdscr,
+    initial_row,
+    get_prev,
+    get_next,
+    bal_amt,
+    account_names,
+    multi,
+    status_provider=None,
 ):
     global IRREG_MODE, IRREG_QUANTILE
     rows = [initial_row]
@@ -1945,7 +1952,11 @@ def ledger_curses(
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
-            visible = h - 2 if multi else h - 1
+            has_status = status_provider is not None
+            if has_status:
+                visible = h - 3 if multi else h - 2
+            else:
+                visible = h - 2 if multi else h - 1
 
             while index < visible // 2:
                 prev_row = get_prev(rows[0].timestamp)
@@ -1973,6 +1984,14 @@ def ledger_curses(
             top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
 
             stdscr.erase()
+            row_y_start = 0
+            if status_provider is not None:
+                status_line = status_provider()
+                try:
+                    stdscr.addnstr(0, 0, status_line, w - 1, curses.A_DIM)
+                except curses.error:
+                    pass
+                row_y_start = 1
             if multi:
                 header = (
                     f"{'Date'} | "
@@ -1983,12 +2002,10 @@ def ledger_curses(
                     f"{'Balance (Total)':>{tot_w}}"
                 )
                 try:
-                    stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
+                    stdscr.addnstr(row_y_start, 0, header, w - 1, curses.A_BOLD)
                 except curses.error:
                     pass
-                row_y_start = 1
-            else:
-                row_y_start = 0
+                row_y_start += 1
 
             for i in range(visible):
                 line_idx = top + i
@@ -2320,11 +2337,37 @@ def ledger_view(stdscr) -> None:
     plan_start = earliest_date
     plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
     account_names = {a.id: a.name for a in accounts}
+    status_line = ""
+
+    def compute_status():
+        nonlocal status_line
+        info = []
+        for aid in account_ids:
+            fb = get_first_balance(session, aid)
+            lr = get_last_checkpoint(session, aid)
+            fb_d = fb.timestamp.date() if fb else None
+            lr_d = lr.as_of_date if lr else None
+            info.append(
+                (
+                    account_names.get(aid, str(aid)),
+                    fb_d.strftime("%Y-%m-%d") if fb_d else "n/a",
+                    lr_d.strftime("%Y-%m-%d") if lr_d else "n/a",
+                )
+            )
+        if len(info) == 1:
+            _, fb_s, lr_s = info[0]
+            status_line = (
+                f"Mode: First-balance anchored • First balance: {fb_s} • Last reconciliation: {lr_s}"
+            )
+        else:
+            parts = [f"{name}: first {fb_s}, last recon {lr_s}" for name, fb_s, lr_s in info]
+            status_line = "Mode: First-balance anchored • " + " | ".join(parts)
 
     rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
     if not rows:
         session.close()
         return
+    compute_status()
 
     ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
     today_date = date.today()
@@ -2337,6 +2380,7 @@ def ledger_view(stdscr) -> None:
         nonlocal rows, ts_list
         rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
         ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
+        compute_status()
 
     def refresh(ts_current: datetime):
         rebuild()
@@ -2377,6 +2421,7 @@ def ledger_view(stdscr) -> None:
         bal_amt,
         account_names,
         len(account_ids) > 1,
+        lambda: status_line,
     )
     session.close()
 
@@ -2404,10 +2449,25 @@ def open_account_ledger(stdscr, account_id: int) -> None:
     plan_start = earliest_date
     plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
     account_names = {account_id: account.name}
+    status_line = ""
+
+    def compute_status():
+        nonlocal status_line
+        fb = get_first_balance(session, account_id)
+        lr = get_last_checkpoint(session, account_id)
+        fb_d = fb.timestamp.date() if fb else None
+        lr_d = lr.as_of_date if lr else None
+        fb_s = fb_d.strftime("%Y-%m-%d") if fb_d else "n/a"
+        lr_s = lr_d.strftime("%Y-%m-%d") if lr_d else "n/a"
+        status_line = (
+            f"Mode: First-balance anchored • First balance: {fb_s} • Last reconciliation: {lr_s}"
+        )
+
     rows = list(ledger_rows(session, plan_start, plan_end, [account_id]))
     if not rows:
         session.close()
         return
+    compute_status()
     ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
     today_date = date.today()
     start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
@@ -2419,6 +2479,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
         nonlocal rows, ts_list
         rows = list(ledger_rows(session, plan_start, plan_end, [account_id]))
         ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
+        compute_status()
 
     def refresh(ts_current: datetime):
         rebuild()
@@ -2458,6 +2519,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
         bal_amt,
         account_names,
         False,
+        lambda: status_line,
     )
     session.close()
 
