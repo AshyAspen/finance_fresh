@@ -140,13 +140,26 @@ def select(stdscr, message, choices, default=None, boxed=True):
     return values[selected]
 
 
-def list_accounts(session):
+def list_accounts(session, include_archived: bool = False):
+    query = session.query(Account)
+    if not include_archived:
+        query = query.filter(Account.archived == False)
+    return query.order_by(Account.name).all()
+
+
+def account_has_activity(session, account_id: int) -> bool:
     return (
-        session.query(Account)
-        .filter(Account.archived == False)
-        .order_by(Account.name)
-        .all()
+        session.query(Transaction).filter_by(account_id=account_id).first() is not None
+        or session.query(Recurring).filter_by(account_id=account_id).first() is not None
+        or session.query(Balance).filter_by(account_id=account_id).first() is not None
     )
+
+
+def format_account_row(account: Account) -> str:
+    row = f"{account.name}  \u2022  {account.type}  \u2022  {account.currency}"
+    if getattr(account, "archived", False):
+        row += " (archived)"
+    return row
 
 
 def pick_account(stdscr, session, prompt="Select account", default=None):
@@ -155,6 +168,57 @@ def pick_account(stdscr, session, prompt="Select account", default=None):
         return None
     choice = select(stdscr, prompt, [(a.name, a) for a in accts], default=default)
     return choice
+
+
+def account_form(
+    stdscr,
+    name: str,
+    acc_type: str,
+    currency: str,
+    allow_archive: bool = False,
+    archived: bool = False,
+):
+    default = "name"
+    while True:
+        choices = [
+            (f"Name: {name}", "name"),
+            (f"Type: {acc_type}", "type"),
+            (f"Currency: {currency}", "currency"),
+        ]
+        if allow_archive:
+            choices.append((f"Archived: {'yes' if archived else 'no'}", "archived"))
+        choices.extend([("Save", "save"), ("Cancel", "cancel")])
+        choice = select(
+            stdscr,
+            "Select field to edit",
+            choices,
+            default=default,
+        )
+        if choice == "name":
+            new_name = text(stdscr, "Name", default=name)
+            if new_name is not None:
+                name = new_name
+            default = "type"
+        elif choice == "type":
+            picked = select(
+                stdscr,
+                "Type",
+                ["checking", "savings", "credit_card", "loan", "cash"],
+                default=acc_type,
+            )
+            if picked is not None:
+                acc_type = picked
+        elif choice == "currency":
+            cur = text(stdscr, "Currency", default=currency)
+            if cur is not None:
+                currency = cur.upper()
+            default = "save"
+        elif choice == "archived":
+            archived = not archived
+        elif choice == "save":
+            return name, acc_type, currency, archived
+        else:
+            return None
 
 
 def _center_box(stdscr, height: int, width: int) -> "curses.window":
@@ -539,6 +603,162 @@ def accounts_menu(stdscr) -> None:
                     CURRENT_ACCOUNT_IDS = [acct.id]
             else:
                 break
+    finally:
+        session.close()
+
+
+def accounts_page(stdscr):
+    """Shows a scrollable list of accounts."""
+
+    session = SessionLocal()
+    index = 0
+    try:
+        with temp_cursor(0), keypad_mode(stdscr):
+            while True:
+                accounts = list_accounts(session, include_archived=True)
+                entries: list[str] = []
+                for acct in accounts:
+                    row = format_account_row(acct)
+                    bal_row = (
+                        session.query(Balance)
+                        .filter(Balance.account_id == acct.id)
+                        .order_by(Balance.timestamp.desc())
+                        .first()
+                    )
+                    if bal_row:
+                        ts = bal_row.timestamp.strftime("%Y-%m-%d")
+                        row += f"  \u2022  ${bal_row.amount:,.2f} (as of {ts})"
+                    entries.append(row)
+
+                h, w = stdscr.getmaxyx()
+                header = "Accounts"
+                offset = 1
+                visible = min(len(entries), h - 2)
+                top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+
+                stdscr.erase()
+                head_x = max(0, (w - len(header)) // 2)
+                try:
+                    stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                except curses.error:
+                    pass
+
+                if entries:
+                    for i in range(visible):
+                        line_idx = top + i
+                        if line_idx >= len(entries):
+                            break
+                        line = entries[line_idx]
+                        attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                        try:
+                            stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                        except curses.error:
+                            pass
+                else:
+                    hint = "No accounts. Press 'a' to add one."
+                    x = max(0, (w - len(hint)) // 2)
+                    try:
+                        stdscr.addnstr(1, x, hint, w - x)
+                    except curses.error:
+                        pass
+
+                footer = "a Add  e Edit  d Delete  Enter Open  q Back"
+                try:
+                    stdscr.addnstr(h - 1, 0, footer, w - 1)
+                except curses.error:
+                    pass
+                stdscr.refresh()
+
+                key = stdscr.getch()
+                if key == curses.KEY_RESIZE:
+                    curses.update_lines_cols()
+                    curses.resize_term(0, 0)
+                    stdscr.clearok(True)
+                    continue
+                if key == curses.KEY_UP and index > 0:
+                    index -= 1
+                elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                    index += 1
+                elif key == curses.KEY_PPAGE:
+                    index = max(0, index - visible)
+                elif key == curses.KEY_NPAGE:
+                    index = min(len(entries) - 1, index + visible)
+                elif key == curses.KEY_HOME:
+                    index = 0
+                elif key == curses.KEY_END:
+                    index = len(entries) - 1
+                elif key in (ord("a"), ord("A")):
+                    form = account_form(stdscr, "", "checking", "USD")
+                    if form is not None:
+                        name, acc_type, currency, _ = form
+                        session.add(Account(name=name, type=acc_type, currency=currency))
+                        session.commit()
+                        index = len(entries)
+                elif key in (ord("e"), ord("E")) and accounts:
+                    acct = accounts[index]
+                    form = account_form(
+                        stdscr,
+                        acct.name,
+                        acct.type,
+                        acct.currency,
+                        allow_archive=True,
+                        archived=acct.archived,
+                    )
+                    if form is not None:
+                        name, acc_type, currency, archived = form
+                        acct = session.get(Account, acct.id)
+                        if acct:
+                            acct.name = name
+                            acct.type = acc_type
+                            acct.currency = currency
+                            acct.archived = archived
+                            session.commit()
+                elif key in (ord("d"), ord("D")) and accounts:
+                    acct = accounts[index]
+                    if account_has_activity(session, acct.id):
+                        resp = text(
+                            stdscr,
+                            "This account has activity. Delete anyway? Type the account name to confirm:",
+                        )
+                        if resp == acct.name:
+                            session.query(Transaction).filter(
+                                Transaction.account_id == acct.id
+                            ).delete(synchronize_session=False)
+                            session.query(Recurring).filter(
+                                Recurring.account_id == acct.id
+                            ).delete(synchronize_session=False)
+                            session.query(Balance).filter(
+                                Balance.account_id == acct.id
+                            ).delete(synchronize_session=False)
+                            session.delete(acct)
+                            session.commit()
+                            index = max(0, index - 1)
+                        elif resp is not None and confirm(stdscr, "Archive instead?"):
+                            acct.archived = True
+                            session.commit()
+                    else:
+                        if confirm(stdscr, "Delete this account?"):
+                            session.delete(acct)
+                            session.commit()
+                            index = max(0, index - 1)
+                elif key in (curses.KEY_ENTER, 10, 13) and accounts:
+                    open_account_ledger(stdscr, accounts[index].id)
+                elif key == ord("k"):
+                    show_key_help(
+                        stdscr,
+                        [
+                            "Up/Down: move selection",
+                            "PgUp/PgDn: page",
+                            "Home/End: jump to start/end",
+                            "a: add",
+                            "e: edit",
+                            "d: delete",
+                            "Enter: open",
+                            "q: back",
+                        ],
+                    )
+                elif key in (ord("q"), ord("Q"), 27):
+                    break
     finally:
         session.close()
 
@@ -1947,6 +2167,87 @@ def ledger_view(stdscr) -> None:
     session.close()
 
 
+def open_account_ledger(stdscr, account_id: int) -> None:
+    session = SessionLocal()
+    account = session.get(Account, account_id)
+    if account is None:
+        session.close()
+        return
+    bal = (
+        session.query(Balance)
+        .filter(Balance.account_id == account_id)
+        .order_by(Balance.timestamp.desc())
+        .first()
+    )
+    bal_amt = bal.amount if bal else 0.0
+    earliest_tx = (
+        session.query(Transaction)
+        .filter(Transaction.account_id == account_id)
+        .order_by(Transaction.timestamp)
+        .first()
+    )
+    earliest_date = earliest_tx.timestamp.date() if earliest_tx else date.today()
+    plan_start = earliest_date
+    plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
+    account_names = {account_id: account.name}
+    rows = list(ledger_rows(session, plan_start, plan_end, [account_id]))
+    if not rows:
+        session.close()
+        return
+    ts_list = [r.timestamp for r in rows]
+    today_date = date.today()
+    start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
+    if start_idx < 0:
+        start_idx = 0
+    initial_row = rows[start_idx]
+
+    def rebuild():
+        nonlocal rows, ts_list
+        rows = list(ledger_rows(session, plan_start, plan_end, [account_id]))
+        ts_list = [r.timestamp for r in rows]
+
+    def refresh(ts_current: datetime):
+        rebuild()
+        target_date = ts_current.date()
+        date_list = [r.timestamp.date() for r in rows]
+        idx = bisect_right(date_list, target_date) - 1
+        if idx < 0:
+            idx = 0
+        return rows[idx]
+
+    def get_prev(ts_before):
+        nonlocal plan_start
+        if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
+            plan_start = add_months(plan_start, -EXTEND_CHUNK_MONTHS)
+            rebuild()
+        idx = bisect_left(ts_list, ts_before) - 1
+        if idx >= 0:
+            return rows[idx]
+        return None
+
+    def get_next(ts_after):
+        nonlocal plan_end
+        if (plan_end - ts_after.date()).days <= EDGE_TRIGGER_DAYS:
+            plan_end = end_of_month(plan_end, EXTEND_CHUNK_MONTHS)
+            rebuild()
+        idx = bisect_right(ts_list, ts_after)
+        if idx < len(rows):
+            return rows[idx]
+        return None
+
+    get_prev.refresh = refresh  # type: ignore[attr-defined]
+    ledger_curses(
+        stdscr,
+        initial_row,
+        get_prev,
+        get_next,
+        bal_amt,
+        account_names,
+        False,
+    )
+    session.close()
+
+
 def irregular_category_form(
     stdscr,
     session,
@@ -2490,7 +2791,7 @@ def main(stdscr) -> None:
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
-                    "Accounts...",
+                    "Accounts",
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
@@ -2509,8 +2810,8 @@ def main(stdscr) -> None:
                 edit_recurring(stdscr, True)
             elif choice == "Irregular spending":
                 irregular_menu(stdscr)
-            elif choice == "Accounts...":
-                accounts_menu(stdscr)
+            elif choice == "Accounts":
+                accounts_page(stdscr)
             elif choice == "Ledger":
                 ledger_view(stdscr)
             elif choice == "Set balance":
