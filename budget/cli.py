@@ -1414,13 +1414,23 @@ def set_balance(stdscr) -> None:
 
         first_bal = get_first_balance(session, acct.id)
         if first_bal is None:
-            session.add(
-                Balance(
-                    amount=amount,
-                    timestamp=datetime.combine(as_of, time.min),
-                    account_id=acct.id,
+            ts = datetime.combine(as_of, time.min)
+            ts_next = ts + timedelta(days=1)
+            existing = (
+                session.query(Balance)
+                .filter(
+                    Balance.account_id == acct.id,
+                    Balance.timestamp >= ts,
+                    Balance.timestamp < ts_next,
                 )
+                .order_by(Balance.timestamp.desc())
+                .first()
             )
+            if existing:
+                existing.amount = amount
+                existing.timestamp = ts
+            else:
+                session.add(Balance(amount=amount, timestamp=ts, account_id=acct.id))
             session.commit()
             set_checkpoint(session, acct.id, as_of)
             return
@@ -1428,13 +1438,23 @@ def set_balance(stdscr) -> None:
         start_d = last_reconcile_date(session, acct.id)
         proj = projected_balance_on(session, acct.id, as_of)
         if round(proj - amount, 2) == 0.0:
-            session.add(
-                Balance(
-                    amount=amount,
-                    timestamp=datetime.combine(as_of, time.min),
-                    account_id=acct.id,
+            ts = datetime.combine(as_of, time.min)
+            ts_next = ts + timedelta(days=1)
+            existing = (
+                session.query(Balance)
+                .filter(
+                    Balance.account_id == acct.id,
+                    Balance.timestamp >= ts,
+                    Balance.timestamp < ts_next,
                 )
+                .order_by(Balance.timestamp.desc())
+                .first()
             )
+            if existing:
+                existing.amount = amount
+                existing.timestamp = ts
+            else:
+                session.add(Balance(amount=amount, timestamp=ts, account_id=acct.id))
             session.commit()
             set_checkpoint(session, acct.id, as_of)
             return
@@ -1475,9 +1495,22 @@ def set_balance(stdscr) -> None:
                 )
             session.commit()
 
-        session.add(
-            Balance(amount=amount, timestamp=ts, account_id=acct.id)
+        ts_next = ts + timedelta(days=1)
+        existing = (
+            session.query(Balance)
+            .filter(
+                Balance.account_id == acct.id,
+                Balance.timestamp >= ts,
+                Balance.timestamp < ts_next,
+            )
+            .order_by(Balance.timestamp.desc())
+            .first()
         )
+        if existing:
+            existing.amount = amount
+            existing.timestamp = ts
+        else:
+            session.add(Balance(amount=amount, timestamp=ts, account_id=acct.id))
         session.commit()
         set_checkpoint(session, acct.id, as_of)
         if abs(delta) >= 0.01:
