@@ -10,6 +10,7 @@ from budget.models import (
     IrregularState,
     Account,
 )
+from sqlalchemy import func
 
 
 def test_transaction_persistence():
@@ -100,7 +101,7 @@ def test_set_balance(monkeypatch):
         bal = (
             session.query(Balance)
             .filter(Balance.account_id == 1)
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         assert bal is not None

@@ -13,6 +13,7 @@ from .models import (
     ReconcileCheckpoint,
 )
 from .services_irregular import irregular_daily_series
+from sqlalchemy import func
 
 
 def add_months(d: date, months: int) -> date:
@@ -272,7 +273,7 @@ def simulate_balances(
         row = (
             session.query(Balance)
             .filter(Balance.account_id == aid)
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         amt = row.amount if row else 0.0

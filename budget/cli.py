@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from collections import defaultdict
 
 from .database import SessionLocal, init_db, ensure_default_account
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from .models import (
     Transaction,
@@ -111,7 +112,7 @@ def select(stdscr, message, choices, default=None, boxed=True):
                 bal_row = (
                     s.query(Balance)
                     .filter(Balance.account_id == acct.id)
-                    .order_by(Balance.timestamp.desc())
+                    .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
                     .first()
                 )
                 amt = bal_row.amount if bal_row else 0.0
@@ -127,7 +128,7 @@ def select(stdscr, message, choices, default=None, boxed=True):
                     bal_row = (
                         s.query(Balance)
                         .filter(Balance.account_id == acct.id)
-                        .order_by(Balance.timestamp.desc())
+                        .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
                         .first()
                     )
                     amt = bal_row.amount if bal_row else 0.0
@@ -629,7 +630,7 @@ def accounts_page(stdscr):
                     bal_row = (
                         session.query(Balance)
                         .filter(Balance.account_id == acct.id)
-                        .order_by(Balance.timestamp.desc())
+                        .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
                         .first()
                     )
                     if bal_row:
@@ -1366,7 +1367,7 @@ def set_balance(stdscr) -> None:
                 bal_row = (
                     session.query(Balance)
                     .filter(Balance.account_id == aid)
-                    .order_by(Balance.timestamp.desc())
+                    .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
                     .first()
                 )
                 amt = bal_row.amount if bal_row else 0.0
@@ -1384,7 +1385,7 @@ def set_balance(stdscr) -> None:
         bal_row = (
             session.query(Balance)
             .filter(Balance.account_id == acct.id)
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         default_amt = f"{bal_row.amount:.2f}" if bal_row else None
@@ -1423,7 +1424,7 @@ def set_balance(stdscr) -> None:
                     Balance.timestamp >= ts,
                     Balance.timestamp < ts_next,
                 )
-                .order_by(Balance.timestamp.desc())
+                .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
                 .first()
             )
             if existing:
@@ -1447,7 +1448,7 @@ def set_balance(stdscr) -> None:
                     Balance.timestamp >= ts,
                     Balance.timestamp < ts_next,
                 )
-                .order_by(Balance.timestamp.desc())
+                .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
                 .first()
             )
             if existing:
@@ -1503,7 +1504,7 @@ def set_balance(stdscr) -> None:
                 Balance.timestamp >= ts,
                 Balance.timestamp < ts_next,
             )
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         if existing:
@@ -2385,7 +2386,7 @@ def ledger_view(stdscr) -> None:
         bal = (
             session.query(Balance)
             .filter(Balance.account_id == aid)
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         if bal:
@@ -2499,7 +2500,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
     bal = (
         session.query(Balance)
         .filter(Balance.account_id == account_id)
-        .order_by(Balance.timestamp.desc())
+        .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
         .first()
     )
     bal_amt = bal.amount if bal else 0.0
