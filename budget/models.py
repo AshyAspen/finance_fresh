@@ -48,6 +48,7 @@ class Transaction(Base):
         default=1,
     )
     transfer_id = Column(String, nullable=True, index=True)
+    # provenance of the transaction, e.g. "recurring" or "reconcile"
     origin_type = Column(String, nullable=True)
     origin_id = Column(Integer, nullable=True)
     origin_occurrence_date = Column(Date, nullable=True)

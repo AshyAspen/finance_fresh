@@ -1443,16 +1443,47 @@ def set_balance(stdscr) -> None:
         if not ok:
             session.rollback()
             return
+
+        ts = datetime.combine(as_of, time.min)
         materialize_recurring_in_window(session, start_d, as_of, [acct.id])
-        session.add(
-            Balance(
-                amount=amount,
-                timestamp=datetime.combine(as_of, time.min),
-                account_id=acct.id,
+        proj_after = projected_balance_on(session, acct.id, as_of)
+        delta = round(amount - proj_after, 2)
+
+        if abs(delta) >= 0.01:
+            existing = (
+                session.query(Transaction)
+                .filter(
+                    Transaction.account_id == acct.id,
+                    Transaction.timestamp >= ts,
+                    Transaction.timestamp < ts + timedelta(days=1),
+                    Transaction.description == "Reconcile Adjustment",
+                )
+                .order_by(Transaction.id.asc())
+                .first()
             )
+            if existing:
+                existing.amount = round((existing.amount or 0.0) + delta, 2)
+            else:
+                session.add(
+                    Transaction(
+                        account_id=acct.id,
+                        timestamp=ts,
+                        amount=delta,
+                        description="Reconcile Adjustment",
+                        origin_type="reconcile",
+                    )
+                )
+            session.commit()
+
+        session.add(
+            Balance(amount=amount, timestamp=ts, account_id=acct.id)
         )
         session.commit()
         set_checkpoint(session, acct.id, as_of)
+        if abs(delta) >= 0.01:
+            toast(stdscr, f"Reconciled: posted adjustment {delta:+.2f}.")
+        else:
+            toast(stdscr, "Reconciled: no adjustment.")
     finally:
         session.close()
 
