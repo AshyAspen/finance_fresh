@@ -449,6 +449,27 @@ def earliest_posted_tx_date(session, account_id: int) -> date | None:
     return t.timestamp.date() if t else None
 
 
+def upsert_balance_for_date(session, account_id: int, as_of: date, amount: float):
+    ts = datetime.combine(as_of, time.min)
+    ts_next = ts + timedelta(days=1)
+    existing = (
+        session.query(Balance)
+        .filter(
+            Balance.account_id == account_id,
+            Balance.timestamp >= ts,
+            Balance.timestamp < ts_next,
+        )
+        .order_by(Balance.id.desc())
+        .first()
+    )
+    if existing:
+        existing.amount = amount
+        existing.timestamp = ts
+    else:
+        session.add(Balance(account_id=account_id, amount=amount, timestamp=ts))
+    session.commit()
+
+
 def _posted_index_for_window(
     session, account_ids, start_d: date, end_d: date
 ):
