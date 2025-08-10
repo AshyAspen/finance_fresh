@@ -10,6 +10,7 @@ from bisect import bisect_left, bisect_right
 from curses import panel
 from contextlib import contextmanager
 from collections import defaultdict
+from typing import Callable
 
 from .database import SessionLocal, init_db, ensure_default_account
 from sqlalchemy import func
@@ -70,6 +71,7 @@ EXTEND_CHUNK_MONTHS = 6
 EDGE_TRIGGER_DAYS = 14
 
 CURRENT_ACCOUNT_IDS: list[int] | None = None  # None means "All Accounts"
+CURRENT_LEDGER_REFRESH: Callable[[datetime], None] | None = None
 
 
 def select(stdscr, message, choices, default=None, boxed=True):
@@ -378,6 +380,17 @@ def confirm(stdscr, message: str) -> bool:
                 show_key_help(stdscr, ["Enter: confirm", "any other key: cancel"])
                 continue
             return ch in (curses.KEY_ENTER, 10, 13)
+
+
+def info(stdscr, msg: str) -> None:
+    h, w = stdscr.getmaxyx()
+    box_w = min(max(len(msg) + 4, 12), max(12, w - 2))
+    with modal_box(stdscr, 3, box_w) as win:
+        try:
+            win.addnstr(1, 2, msg[: box_w - 4], box_w - 4)
+        except curses.error:
+            pass
+        win.getch()
 
 
 def toast(stdscr, msg: str, ms: int = 900):
@@ -1514,10 +1527,9 @@ def set_balance(stdscr) -> None:
             session.add(Balance(amount=amount, timestamp=ts, account_id=acct.id))
         session.commit()
         set_checkpoint(session, acct.id, as_of)
-        if abs(delta) >= 0.01:
-            toast(stdscr, f"Reconciled: posted adjustment {delta:+.2f}.")
-        else:
-            toast(stdscr, "Reconciled: no adjustment.")
+        info(stdscr, f"Reconciled to ${amount:,.2f}.")
+        if CURRENT_LEDGER_REFRESH:
+            CURRENT_LEDGER_REFRESH(ts)
     finally:
         session.close()
 
@@ -2477,6 +2489,8 @@ def ledger_view(stdscr) -> None:
             return rows[idx]
         return None
 
+    global CURRENT_LEDGER_REFRESH
+    CURRENT_LEDGER_REFRESH = refresh
     get_prev.refresh = refresh  # type: ignore[attr-defined]
     ledger_curses(
         stdscr,
@@ -2488,6 +2502,7 @@ def ledger_view(stdscr) -> None:
         len(account_ids) > 1,
         lambda: status_line,
     )
+    CURRENT_LEDGER_REFRESH = None
     session.close()
 
 
@@ -2575,6 +2590,8 @@ def open_account_ledger(stdscr, account_id: int) -> None:
             return rows[idx]
         return None
 
+    global CURRENT_LEDGER_REFRESH
+    CURRENT_LEDGER_REFRESH = refresh
     get_prev.refresh = refresh  # type: ignore[attr-defined]
     ledger_curses(
         stdscr,
@@ -2586,6 +2603,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
         False,
         lambda: status_line,
     )
+    CURRENT_LEDGER_REFRESH = None
     session.close()
 
 
