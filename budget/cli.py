@@ -111,29 +111,13 @@ def select(stdscr, message, choices, default=None, boxed=True):
         if accts:
             if len(accts) == 1:
                 acct = accts[0]
-                bal_row = (
-                    s.query(Balance)
-                    .filter(Balance.account_id == acct.id)
-                    .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
-                    .first()
-                )
-                amt = bal_row.amount if bal_row else 0.0
-                ts = (
-                    bal_row.timestamp.strftime("%Y-%m-%d")
-                    if bal_row and bal_row.timestamp
-                    else "n/a"
-                )
-                footer_right = f"{acct.name}: {amt:.2f} @ {ts}"
+                as_of = date.today()
+                amt = display_balance_as_of(s, acct.id, as_of)
+                footer_right = f"{acct.name}: {amt:.2f} @ {as_of:%Y-%m-%d}"
             else:
                 parts: list[str] = []
                 for acct in accts:
-                    bal_row = (
-                        s.query(Balance)
-                        .filter(Balance.account_id == acct.id)
-                        .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
-                        .first()
-                    )
-                    amt = bal_row.amount if bal_row else 0.0
+                    amt = display_balance_as_of(s, acct.id, date.today())
                     parts.append(f"{acct.name}:{amt:.2f}")
                 footer_right = "; ".join(parts)
 
@@ -640,15 +624,9 @@ def accounts_page(stdscr):
                 entries: list[str] = []
                 for acct in accounts:
                     row = format_account_row(acct)
-                    bal_row = (
-                        session.query(Balance)
-                        .filter(Balance.account_id == acct.id)
-                        .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
-                        .first()
-                    )
-                    if bal_row:
-                        ts = bal_row.timestamp.strftime("%Y-%m-%d")
-                        row += f"  \u2022  ${bal_row.amount:,.2f} (as of {ts})"
+                    as_of = date.today()
+                    amt = display_balance_as_of(session, acct.id, as_of)
+                    row += f"  \u2022  ${amt:,.2f} (as of {as_of:%Y-%m-%d})"
                     entries.append(row)
 
                 h, w = stdscr.getmaxyx()
@@ -1241,6 +1219,22 @@ def projected_balance_on(session, account_id: int, as_of: date) -> float:
         for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
         if r.timestamp.date() <= as_of
     ]
+    return rows[-1].running_account if rows else 0.0
+
+
+def display_balance_as_of(session, account_id: int, as_of: date) -> float:
+    """Return running balance for account at ``as_of`` using ledger rules."""
+    rows = [r for r in ledger_rows(session, as_of, as_of, account_ids=[account_id])]
+    if not rows:
+        fb = get_first_balance(session, account_id)
+        start_d = fb.timestamp.date() if fb else (
+            earliest_posted_tx_date(session, account_id) or as_of
+        )
+        rows = [
+            r
+            for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
+            if r.timestamp.date() <= as_of
+        ]
     return rows[-1].running_account if rows else 0.0
 
 
