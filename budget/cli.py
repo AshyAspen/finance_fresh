@@ -38,6 +38,9 @@ from .services import (
     delete_transfer,
     update_transfer,
     max_safe_payment_today,
+    create_recurring_transfer,
+    update_recurring_transfer,
+    delete_recurring_transfer,
 )
 
 FREQUENCIES = [
@@ -540,38 +543,88 @@ def accounts_menu(stdscr) -> None:
         session.close()
 
 
+def recurring_form(
+    stdscr,
+    session,
+    from_acct: Account,
+    description: str,
+    start: datetime,
+    amount: float,
+    to_acct: Account | None,
+    freq: str,
+):
+    """Interactive form for adding/editing recurring bills/incomes."""
+
+    default = "name"
+    while True:
+        to_label = to_acct.name if to_acct else "Outgoing transaction"
+        choice = select(
+            stdscr,
+            "Select field to edit",
+            choices=[
+                (f"From: {from_acct.name}", "from"),
+                (f"Date: {start.strftime('%Y-%m-%d')}", "date"),
+                (f"Name: {description}", "name"),
+                (f"Amount: {amount}", "amount"),
+                (f"To: {to_label}", "to"),
+                (f"Recurring: {freq}", "recurring"),
+                ("Save", "save"),
+                ("Cancel", "cancel"),
+            ],
+            default=default,
+        )
+
+        if choice == "name":
+            new_desc = text(stdscr, "Name", default=description)
+            if new_desc is not None:
+                description = new_desc
+            default = "amount"
+        elif choice == "date":
+            date_str = text(
+                stdscr, "Date (YYYY-MM-DD)", default=start.strftime("%Y-%m-%d")
+            )
+            if date_str is not None:
+                try:
+                    start = datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    pass
+        elif choice == "amount":
+            amount_str = text(stdscr, "Amount", default=str(amount))
+            if amount_str is not None:
+                try:
+                    amount = float(amount_str)
+                except ValueError:
+                    pass
+            default = "recurring"
+        elif choice == "to":
+            accts = (
+                session.query(Account)
+                .filter(Account.archived == False, Account.id != from_acct.id)
+                .order_by(Account.name)
+                .all()
+            )
+            if accts:
+                to_acct = select(
+                    stdscr, "To account", [(a.name, a) for a in accts], default=to_acct
+                )
+        elif choice == "recurring":
+            picked = select(
+                stdscr, "Frequency", FREQUENCIES, default=freq
+            )
+            if picked is not None:
+                freq = picked
+            default = "save"
+        elif choice == "save":
+            return description, start, amount, to_acct, freq
+        elif choice == "from":
+            continue
+        else:
+            return None
+
+
 def add_recurring(stdscr, is_income: bool, existing: Recurring | None = None) -> None:
     """Prompt user to add or edit a recurring bill or income."""
 
-    name = text(stdscr, "Name", default=existing.description if existing else None)
-    if name is None:
-        return
-    date_str = text(
-        stdscr,
-        "Start date (YYYY-MM-DD)",
-        default=existing.start_date.strftime("%Y-%m-%d") if existing else None,
-    )
-    if date_str is None:
-        return
-    amount_str = text(
-        stdscr,
-        "Amount",
-        default=str(abs(existing.amount)) if existing else None,
-    )
-    if amount_str is None:
-        return
-    freq = select(
-        stdscr,
-        "Frequency",
-        FREQUENCIES,
-        default=existing.frequency if existing else None,
-    )
-    try:
-        start = datetime.strptime(date_str, "%Y-%m-%d")
-        amount = float(amount_str)
-    except ValueError:
-        return
-    amount = abs(amount) if is_income else -abs(amount)
     session = SessionLocal()
     try:
         if existing is not None:
@@ -580,29 +633,100 @@ def add_recurring(stdscr, is_income: bool, existing: Recurring | None = None) ->
             default_acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
         else:
             default_acct = None
-        acct = pick_account(stdscr, session, "Account", default=default_acct)
-        if acct is None:
+        from_acct = pick_account(stdscr, session, "From account", default=default_acct)
+        if from_acct is None:
             return
-        account_id = acct.id
-        if existing is None:
-            rec = Recurring(
-                description=name,
-                amount=amount,
-                start_date=start,
-                frequency=freq,
-                account_id=account_id,
+        description = existing.description if existing else ""
+        start = existing.start_date if existing else datetime.utcnow()
+        amount = abs(existing.amount) if existing else 0.0
+        freq = existing.frequency if existing else "monthly"
+        to_acct = None
+        if existing and existing.transfer_id:
+            other = (
+                session.query(Recurring)
+                .filter(Recurring.transfer_id == existing.transfer_id, Recurring.id != existing.id)
+                .first()
             )
-            session.add(rec)
+            if other:
+                to_acct = session.get(Account, other.account_id)
+
+        form = recurring_form(
+            stdscr, session, from_acct, description, start, amount, to_acct, freq
+        )
+        if form is None:
+            return
+        description, start, amount, to_acct, freq = form
+
+        if existing is None:
+            if to_acct is None:
+                amt = abs(amount) if is_income else -abs(amount)
+                rec = Recurring(
+                    description=description,
+                    amount=amt,
+                    start_date=start,
+                    frequency=freq,
+                    account_id=from_acct.id,
+                )
+                session.add(rec)
+                session.commit()
+            else:
+                create_recurring_transfer(
+                    session,
+                    from_acct.id,
+                    to_acct.id,
+                    amount,
+                    start,
+                    freq,
+                    description,
+                )
         else:
             rec = session.get(Recurring, existing.id)
             if rec is None:
                 return
-            rec.description = name
-            rec.amount = amount
-            rec.start_date = start
-            rec.frequency = freq
-            rec.account_id = account_id
-        session.commit()
+            if rec.transfer_id:
+                if to_acct is None:
+                    delete_recurring_transfer(session, rec.transfer_id)
+                    amt = abs(amount) if is_income else -abs(amount)
+                    rec = Recurring(
+                        description=description,
+                        amount=amt,
+                        start_date=start,
+                        frequency=freq,
+                        account_id=from_acct.id,
+                    )
+                    session.add(rec)
+                    session.commit()
+                else:
+                    update_recurring_transfer(
+                        session,
+                        rec.transfer_id,
+                        description,
+                        amount,
+                        start,
+                        freq,
+                        from_acct.id,
+                        to_acct.id,
+                    )
+            else:
+                if to_acct is None:
+                    rec.description = description
+                    rec.amount = abs(amount) if is_income else -abs(amount)
+                    rec.start_date = start
+                    rec.frequency = freq
+                    rec.account_id = from_acct.id
+                    session.commit()
+                else:
+                    session.delete(rec)
+                    session.commit()
+                    create_recurring_transfer(
+                        session,
+                        from_acct.id,
+                        to_acct.id,
+                        amount,
+                        start,
+                        freq,
+                        description,
+                    )
     finally:
         session.close()
 
@@ -739,8 +863,11 @@ def edit_recurring(stdscr, is_income: bool) -> None:
             if del_idx < len(recs):
                 rec = recs[del_idx]
                 if confirm(stdscr, "Delete this item?"):
-                    session.delete(rec)
-                    session.commit()
+                    if rec.transfer_id:
+                        delete_recurring_transfer(session, rec.transfer_id)
+                    else:
+                        session.delete(rec)
+                        session.commit()
             session.close()
             session = SessionLocal()
             continue

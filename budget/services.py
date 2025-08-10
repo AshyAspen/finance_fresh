@@ -166,6 +166,90 @@ def update_transfer(
     session.commit()
 
 
+def create_recurring_transfer(
+    session,
+    from_account_id: int,
+    to_account_id: int,
+    amount: float,
+    start: datetime,
+    frequency: str,
+    description: str = "Transfer",
+) -> str:
+    """Create a two-leg recurring transfer and return the transfer id."""
+
+    tid = str(uuid.uuid4())
+    from_acct = session.get(Account, from_account_id)
+    out_desc = description
+    in_desc = description
+    if description.strip().lower() == "transfer" and from_acct:
+        in_desc = f"Transfer from {from_acct.name}"
+    r_out = Recurring(
+        account_id=from_account_id,
+        amount=-abs(amount),
+        description=out_desc,
+        start_date=start,
+        frequency=frequency,
+        transfer_id=tid,
+    )
+    r_in = Recurring(
+        account_id=to_account_id,
+        amount=abs(amount),
+        description=in_desc,
+        start_date=start,
+        frequency=frequency,
+        transfer_id=tid,
+    )
+    session.add_all([r_out, r_in])
+    session.commit()
+    return tid
+
+
+def update_recurring_transfer(
+    session,
+    transfer_id: str,
+    description: str,
+    amount: float,
+    start: datetime,
+    frequency: str,
+    from_account_id: int,
+    to_account_id: int,
+) -> None:
+    recs = (
+        session.query(Recurring)
+        .filter(Recurring.transfer_id == transfer_id)
+        .all()
+    )
+    if len(recs) != 2:
+        return
+    from_acct = session.get(Account, from_account_id)
+    in_desc = description
+    if description.strip().lower() == "transfer" and from_acct:
+        in_desc = f"Transfer from {from_acct.name}"
+    for r in recs:
+        if r.amount < 0:
+            r.account_id = from_account_id
+            r.amount = -abs(amount)
+            r.description = description
+        else:
+            r.account_id = to_account_id
+            r.amount = abs(amount)
+            r.description = in_desc
+        r.start_date = start
+        r.frequency = frequency
+    session.commit()
+
+
+def delete_recurring_transfer(session, transfer_id: str) -> None:
+    recs = (
+        session.query(Recurring)
+        .filter(Recurring.transfer_id == transfer_id)
+        .all()
+    )
+    for r in recs:
+        session.delete(r)
+    session.commit()
+
+
 def simulate_balances(
     session,
     start_date: date,

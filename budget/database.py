@@ -104,6 +104,14 @@ def init_db() -> None:
                     "CREATE INDEX IF NOT EXISTS ix_transactions_transfer_id ON transactions(transfer_id)"
                 )
             )
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(recurring)"))]
+        if "transfer_id" not in cols:
+            conn.execute(text("ALTER TABLE recurring ADD COLUMN transfer_id TEXT"))
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_recurring_transfer_id ON recurring(transfer_id)"
+                )
+            )
         # If a legacy balance row exists, duplicate it for the default account
         res = conn.execute(
             text("SELECT COUNT(*) FROM balance WHERE account_id = :acc"),

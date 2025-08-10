@@ -87,6 +87,7 @@ class Recurring(Base):
         nullable=False,
         default=1,
     )
+    transfer_id = Column(String, nullable=True, index=True)
 
 
 class Goal(Base):
