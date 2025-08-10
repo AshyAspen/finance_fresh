@@ -95,6 +95,15 @@ def init_db() -> None:
                         f"CREATE INDEX IF NOT EXISTS ix_{table}_account_id_timestamp ON {table}(account_id, timestamp)"
                     )
                 )
+
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(transactions)"))]
+        if "transfer_id" not in cols:
+            conn.execute(text("ALTER TABLE transactions ADD COLUMN transfer_id TEXT"))
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_transactions_transfer_id ON transactions(transfer_id)"
+                )
+            )
         # If a legacy balance row exists, duplicate it for the default account
         res = conn.execute(
             text("SELECT COUNT(*) FROM balance WHERE account_id = :acc"),

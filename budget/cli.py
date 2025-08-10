@@ -31,7 +31,14 @@ from .services_irregular import (
     update_irregular_state,
     get_or_create_state,
 )
-from .services import occurrences_between, create_transfer, max_safe_payment_today
+from .services import (
+    occurrences_between,
+    create_transaction,
+    create_transfer,
+    delete_transfer,
+    update_transfer,
+    max_safe_payment_today,
+)
 
 FREQUENCIES = [
     "weekly",
@@ -309,29 +316,43 @@ def toast(stdscr, msg: str, ms: int = 900):
         curses.napms(ms)
 
 
-def transaction_form(stdscr, description: str, timestamp: datetime, amount: float):
-    """Interactive form for editing transaction fields.
+def transaction_form(
+    stdscr,
+    session,
+    from_acct: Account,
+    description: str,
+    timestamp: datetime,
+    amount: float,
+    to_acct: Account | None = None,
+):
+    """Interactive form for adding/editing transactions with optional transfer.
 
-    Returns ``(description, timestamp, amount)`` if saved, otherwise ``None``.
+    Returns ``(description, timestamp, amount, to_acct)`` if saved, otherwise ``None``.
     """
 
+    default = "name"
     while True:
+        to_label = to_acct.name if to_acct else "Outgoing transaction"
         choice = select(
             stdscr,
             "Select field to edit",
             choices=[
-                (f"Name: {description}", "description"),
+                (f"From: {from_acct.name}", "from"),
                 (f"Date: {timestamp.strftime('%Y-%m-%d')}", "date"),
+                (f"Name: {description}", "name"),
                 (f"Amount: {amount}", "amount"),
+                (f"To: {to_label}", "to"),
                 ("Save", "save"),
                 ("Cancel", "cancel"),
             ],
+            default=default,
         )
 
-        if choice == "description":
-            new_desc = text(stdscr, "Description", default=description)
+        if choice == "name":
+            new_desc = text(stdscr, "Name", default=description)
             if new_desc is not None:
                 description = new_desc
+            default = "amount"
         elif choice == "date":
             date_str = text(
                 stdscr, "Date (YYYY-MM-DD)", default=timestamp.strftime("%Y-%m-%d")
@@ -348,8 +369,23 @@ def transaction_form(stdscr, description: str, timestamp: datetime, amount: floa
                     amount = float(amount_str)
                 except ValueError:
                     pass
+            default = "save"
+        elif choice == "to":
+            accts = (
+                session.query(Account)
+                .filter(Account.archived == False, Account.id != from_acct.id)
+                .order_by(Account.name)
+                .all()
+            )
+            if accts:
+                picked = select(
+                    stdscr, "To account", [(a.name, a) for a in accts], default=to_acct
+                )
+                to_acct = picked
         elif choice == "save":
-            return description, timestamp, amount
+            return description, timestamp, amount, to_acct
+        elif choice == "from":
+            continue
         else:
             return None
 
@@ -358,104 +394,48 @@ def add_transaction(stdscr) -> None:
     """Prompt user for transaction data and persist it."""
     session = SessionLocal()
     try:
+        default_acct = None
         if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
-            account_id = CURRENT_ACCOUNT_IDS[0]
-        else:
-            acct = pick_account(stdscr, session, "Transaction account")
-            if acct is None:
-                return
-            account_id = acct.id
+            default_acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+        from_acct = pick_account(stdscr, session, "From account", default=default_acct)
+        if from_acct is None:
+            return
 
-        form = transaction_form(stdscr, "", datetime.utcnow(), 0.0)
+        form = transaction_form(
+            stdscr, session, from_acct, "", datetime.utcnow(), 0.0, None
+        )
         if form is None:
             return
-        description, timestamp, amount = form
-        txn = Transaction(
-            account_id=account_id,
-            description=description,
-            amount=amount,
-            timestamp=timestamp,
-        )
-        session.add(txn)
-        session.commit()
+        description, timestamp, amount, to_acct = form
+        if to_acct is None:
+            txn = create_transaction(
+                session, from_acct.id, description, amount, timestamp
+            )
+        else:
+            create_transfer(
+                session, from_acct.id, to_acct.id, amount, timestamp, description
+            )
+            txn = None
 
-        category_id = match_category_id(session, txn.description, txn.account_id)
-        if category_id is not None:
-            state = get_or_create_state(session, category_id)
-            update_irregular_state(state, txn)
-            session.commit()
-            cat = session.get(IrregularCategory, category_id)
-            if cat is not None:
-                avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
-                med = state.median_amount if state.median_amount is not None else 0.0
-                toast(
-                    stdscr,
-                    f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
-                )
+        if txn is not None:
+            category_id = match_category_id(session, txn.description, txn.account_id)
+            if category_id is not None:
+                state = get_or_create_state(session, category_id)
+                update_irregular_state(state, txn)
+                session.commit()
+                cat = session.get(IrregularCategory, category_id)
+                if cat is not None:
+                    avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
+                    med = (
+                        state.median_amount if state.median_amount is not None else 0.0
+                    )
+                    toast(
+                        stdscr,
+                        f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
+                    )
     finally:
         session.close()
 
-
-def add_transfer(stdscr) -> None:
-    """Prompt user for transfer details and persist it."""
-
-    session = SessionLocal()
-    try:
-        accounts = (
-            session.query(Account)
-            .filter(Account.archived == False)
-            .order_by(Account.name)
-            .all()
-        )
-        if len(accounts) < 2:
-            return
-
-        default_from = None
-        if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
-            default_from = session.get(Account, CURRENT_ACCOUNT_IDS[0])
-
-        from_acc = pick_account(
-            stdscr, session, "From account", default=default_from
-        )
-        if from_acc is None:
-            return
-
-        dest_accts = [a for a in accounts if a.id != from_acc.id]
-        if not dest_accts:
-            return
-        to_acc = select(
-            stdscr, "To account", [(a.name, a) for a in dest_accts]
-        )
-        if to_acc is None:
-            return
-
-        amt_str = text(stdscr, "Amount")
-        if amt_str is None:
-            return
-        try:
-            amount = float(amt_str)
-        except ValueError:
-            return
-
-        when_str = text(
-            stdscr,
-            "Date/time (YYYY-MM-DD HH:MM)",
-            default=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-        )
-        if when_str is None:
-            return
-        try:
-            when = datetime.strptime(when_str, "%Y-%m-%d %H:%M")
-        except ValueError:
-            when = datetime.utcnow()
-
-        desc = text(stdscr, "Description", default="Transfer")
-        if desc is None:
-            desc = "Transfer"
-
-        create_transfer(session, from_acc.id, to_acc.id, amount, when, desc)
-    finally:
-        session.close()
 
 
 def max_payment_today_menu(stdscr) -> None:
@@ -781,14 +761,30 @@ def edit_recurring(stdscr, is_income: bool) -> None:
 
 def edit_transaction(stdscr, session, txn: Transaction) -> None:
     """Edit an existing transaction in-place."""
-    form = transaction_form(stdscr, txn.description, txn.timestamp, txn.amount)
+    from_acct = session.get(Account, txn.account_id)
+    to_acct = None
+    if txn.transfer_id:
+        other = (
+            session.query(Transaction)
+            .filter(Transaction.transfer_id == txn.transfer_id, Transaction.id != txn.id)
+            .first()
+        )
+        if other:
+            to_acct = session.get(Account, other.account_id)
+    amt = abs(txn.amount) if txn.transfer_id else txn.amount
+    form = transaction_form(
+        stdscr, session, from_acct, txn.description, txn.timestamp, amt, to_acct
+    )
     if form is None:
         return
-    description, timestamp, amount = form
-    txn.description = description
-    txn.timestamp = timestamp
-    txn.amount = amount
-    session.commit()
+    description, timestamp, amount, _ = form
+    if txn.transfer_id:
+        update_transfer(session, txn.transfer_id, description, amount, timestamp)
+    else:
+        txn.description = description
+        txn.timestamp = timestamp
+        txn.amount = amount
+        session.commit()
 
 
 def list_transactions(stdscr) -> None:
@@ -820,8 +816,11 @@ def list_transactions(stdscr) -> None:
             if del_idx < len(txns):
                 txn = txns[del_idx]
                 if confirm(stdscr, "Delete this transaction?"):
-                    session.delete(txn)
-                    session.commit()
+                    if txn.transfer_id:
+                        delete_transfer(session, txn.transfer_id)
+                    else:
+                        session.delete(txn)
+                        session.commit()
             session.close()
             session = SessionLocal()
             continue
@@ -1497,6 +1496,18 @@ def ledger_curses(
                 index = 0
             elif key == curses.KEY_END:
                 index = len(rows) - 1
+            elif key == ord("a"):
+                add_transaction(stdscr)
+                current_ts = rows[index].timestamp
+                if hasattr(get_prev, "refresh"):
+                    new_row = get_prev.refresh(current_ts)
+                    rows = [new_row]
+                    index = 0
+                    desc_w = len(new_row.description)
+                    amt_w = len(f"{new_row.amount:.2f}")
+                    run_w = len(f"{new_row.running_account:.2f}")
+                    if multi:
+                        tot_w = len(f"{new_row.running_total:.2f}")
             elif key in (ord("t"), ord("T")):
                 if IRREG_MODE == "deterministic":
                     IRREG_MODE = "monte_carlo"
@@ -2335,7 +2346,6 @@ def main(stdscr) -> None:
                 "Select an option",
                 choices=[
                     "List transactions",
-                    "New Transfer",
                     "Max Safe Payment (today)",
                     "Edit bills",
                     "Edit income",
@@ -2351,8 +2361,6 @@ def main(stdscr) -> None:
             )
             if choice == "List transactions":
                 list_transactions(stdscr)
-            elif choice == "New Transfer":
-                add_transfer(stdscr)
             elif choice == "Max Safe Payment (today)":
                 max_payment_today_menu(stdscr)
             elif choice == "Edit bills":

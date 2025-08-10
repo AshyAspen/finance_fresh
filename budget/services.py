@@ -4,7 +4,7 @@ import calendar
 import uuid
 from typing import Iterable, Iterator
 
-from .models import Transaction, Recurring, Balance
+from .models import Account, Balance, Recurring, Transaction
 from .services_irregular import irregular_daily_series
 
 
@@ -88,6 +88,24 @@ def occurrences_between(anchor: date, frequency: str, start: date, end: date) ->
     return list(it)
 
 
+def create_transaction(
+    session,
+    account_id: int,
+    description: str,
+    amount: float,
+    when: datetime,
+) -> Transaction:
+    txn = Transaction(
+        account_id=account_id,
+        description=description,
+        amount=amount,
+        timestamp=when,
+    )
+    session.add(txn)
+    session.commit()
+    return txn
+
+
 def create_transfer(
     session,
     from_account_id: int,
@@ -95,29 +113,57 @@ def create_transfer(
     amount: float,
     when: datetime,
     description: str = "Transfer",
-):
-    """Create a two-leg transfer between accounts and return the group id."""
+) -> str:
+    """Create a two-leg transfer between accounts and return the transfer id."""
 
-    gid = str(uuid.uuid4())
+    tid = str(uuid.uuid4())
+    from_acct = session.get(Account, from_account_id)
+    out_desc = description
+    in_desc = description
+    if description.strip().lower() == "transfer" and from_acct:
+        in_desc = f"Transfer from {from_acct.name}"
     t_out = Transaction(
         account_id=from_account_id,
         amount=-abs(amount),
-        description=description,
+        description=out_desc,
         timestamp=when,
-        transfer_group_id=gid,
-        counterparty_account_id=to_account_id,
+        transfer_id=tid,
     )
     t_in = Transaction(
         account_id=to_account_id,
         amount=abs(amount),
-        description=description,
+        description=in_desc,
         timestamp=when,
-        transfer_group_id=gid,
-        counterparty_account_id=from_account_id,
+        transfer_id=tid,
     )
     session.add_all([t_out, t_in])
     session.commit()
-    return gid
+    return tid
+
+
+def delete_transfer(session, transfer_id: str) -> None:
+    txns = session.query(Transaction).filter(Transaction.transfer_id == transfer_id).all()
+    for t in txns:
+        session.delete(t)
+    session.commit()
+
+
+def update_transfer(
+    session,
+    transfer_id: str,
+    description: str,
+    amount: float,
+    when: datetime,
+) -> None:
+    txns = session.query(Transaction).filter(Transaction.transfer_id == transfer_id).all()
+    for t in txns:
+        t.description = description
+        t.timestamp = when
+        if t.amount < 0:
+            t.amount = -abs(amount)
+        else:
+            t.amount = abs(amount)
+    session.commit()
 
 
 def simulate_balances(
