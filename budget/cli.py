@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 import curses
 import calendar
 from dataclasses import dataclass
@@ -41,6 +41,10 @@ from .services import (
     create_recurring_transfer,
     update_recurring_transfer,
     delete_recurring_transfer,
+    earliest_posted_tx_date,
+    get_first_balance,
+    _posted_index_for_window,
+    _overlaps_posted,
 )
 
 FREQUENCIES = [
@@ -1539,23 +1543,20 @@ def ledger_rows(
     if not account_ids:
         account_ids = [ensure_default_account(session).id]
 
-    bal_map: dict[int, tuple[float, datetime]] = {}
+    first_bal_ts: dict[int, datetime] = {}
+    first_bal_amt: dict[int, float] = {}
+    earliest_tx_d: dict[int, date | None] = {}
     for aid in account_ids:
-        row = (
-            session.query(Balance)
-            .filter(Balance.account_id == aid)
-            .order_by(Balance.timestamp.desc())
-            .first()
-        )
-        amt = row.amount if row else 0.0
-        ts = (
-            row.timestamp
-            if row and row.timestamp
-            else datetime.combine(date.today(), datetime.min.time())
-        )
-        bal_map[aid] = (amt, ts)
+        fb = get_first_balance(session, aid)
+        if fb:
+            first_bal_ts[aid] = fb.timestamp
+            first_bal_amt[aid] = fb.amount or 0.0
+        else:
+            first_bal_ts[aid] = datetime.combine(date.today(), time.min)
+            first_bal_amt[aid] = 0.0
+        earliest_tx_d[aid] = earliest_posted_tx_date(session, aid)
 
-    min_bal_date = min(ts.date() for _, ts in bal_map.values())
+    min_bal_date = min(ts.date() for ts in first_bal_ts.values())
 
     if plan_start is None or plan_end is None:
         earliest_tx = (
@@ -1567,6 +1568,8 @@ def ledger_rows(
         earliest_date = earliest_tx.timestamp.date() if earliest_tx else min_bal_date
         plan_start = min(earliest_date, min_bal_date)
         plan_end = date.today() + timedelta(days=3650)  # ~10 years
+
+    posted_idx = _posted_index_for_window(session, account_ids, plan_start, date.today())
 
     txns = (
         session.query(Transaction)
@@ -1582,7 +1585,12 @@ def ledger_rows(
             r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
         )
         occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
+        lower_bound = max(
+            plan_start, earliest_tx_d[r.account_id] or first_bal_ts[r.account_id].date()
+        )
         for occ in occs:
+            if occ < lower_bound:
+                continue
             synthetic_txns.append(
                 Transaction(
                     description=r.description,
@@ -1604,7 +1612,10 @@ def ledger_rows(
             mode=IRREG_MODE,
             quantile=IRREG_QUANTILE,
         )
+        lower_bound = max(plan_start, earliest_tx_d[aid] or first_bal_ts[aid].date())
         for d, amt in irr_forecast:
+            if d < lower_bound:
+                continue
             if amt:
                 irr_series.append(
                     Transaction(
@@ -1656,24 +1667,28 @@ def ledger_rows(
 
     txns.sort(key=_ledger_sort_key)
 
-    def is_posted(t):
-        return getattr(t, "_source_type", "posted") == "posted"
+    def _synthetic_overlaps_posted(t: Transaction) -> bool:
+        return _overlaps_posted(
+            posted_idx,
+            t.account_id,
+            t.timestamp.date(),
+            t.amount or 0.0,
+            t.description or "",
+        )
 
     offset: dict[int, float] = {}
-    for aid, (bal_amt, bal_ts) in bal_map.items():
+    for aid in account_ids:
+        bal_ts = first_bal_ts[aid]
+        bal_amt = first_bal_amt[aid]
         total_before = 0.0
         for t in txns:
-            if t.account_id == aid and t.timestamp <= bal_ts and is_posted(t):
-                total_before += t.amount
+            if (
+                t.account_id == aid
+                and t.timestamp <= bal_ts
+                and getattr(t, "_source_type", "posted") == "posted"
+            ):
+                total_before += t.amount or 0.0
         offset[aid] = bal_amt - total_before
-
-    total_offset = sum(offset.values())
-
-    def effective_amount(t: Transaction) -> float:
-        bal_ts = bal_map[t.account_id][1]
-        if t.timestamp <= bal_ts and not is_posted(t):
-            return 0.0
-        return t.amount
 
     running_by_acct: defaultdict[int, float] = defaultdict(float)
     last_ts: datetime | None = None
@@ -1681,21 +1696,35 @@ def ledger_rows(
     for t in txns:
         if not (plan_start <= t.timestamp.date() <= plan_end):
             continue
-        assert t.account_id in account_ids
+        aid = t.account_id
+        ts_d = t.timestamp.date()
+        src = getattr(t, "_source_type", "posted")
+        first_ts_d = first_bal_ts[aid].date()
+        if ts_d < first_ts_d:
+            eff = t.amount or 0.0
+        elif first_ts_d <= ts_d <= date.today():
+            if src == "posted":
+                eff = t.amount or 0.0
+            else:
+                eff = 0.0 if _synthetic_overlaps_posted(t) else (t.amount or 0.0)
+        else:
+            eff = t.amount or 0.0
+
         if t.timestamp == last_ts:
             bump += 1
         else:
             last_ts = t.timestamp
             bump = 0
-        running_by_acct[t.account_id] += effective_amount(t)
-        running_account = running_by_acct[t.account_id] + offset[t.account_id]
-        running_total = sum(running_by_acct.values()) + total_offset
+
+        running_by_acct[aid] += eff
+        display_running = running_by_acct[aid] + offset[aid]
+        running_total = sum(running_by_acct.values()) + sum(offset.values())
         yield LedgerRow(
             t.timestamp + timedelta(microseconds=bump),
             t.account_id,
             t.description,
             t.amount,
-            running_account,
+            display_running,
             running_total,
         )
 
@@ -2112,7 +2141,7 @@ def ledger_view(stdscr) -> None:
         session.close()
         return
 
-    ts_list = [r.timestamp for r in rows]
+    ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
     today_date = date.today()
     start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
     if start_idx < 0:
@@ -2122,7 +2151,7 @@ def ledger_view(stdscr) -> None:
     def rebuild():
         nonlocal rows, ts_list
         rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
-        ts_list = [r.timestamp for r in rows]
+        ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
 
     def refresh(ts_current: datetime):
         rebuild()
@@ -2139,7 +2168,7 @@ def ledger_view(stdscr) -> None:
         if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
             plan_start = add_months(plan_start, -EXTEND_CHUNK_MONTHS)
             rebuild()
-        idx = bisect_left(ts_list, ts_before) - 1
+        idx = bisect_left(ts_list, (ts_before, -1)) - 1
         if idx >= 0:
             return rows[idx]
         return None
@@ -2149,7 +2178,7 @@ def ledger_view(stdscr) -> None:
         if (plan_end - ts_after.date()).days <= EDGE_TRIGGER_DAYS:
             plan_end = end_of_month(plan_end, EXTEND_CHUNK_MONTHS)
             rebuild()
-        idx = bisect_right(ts_list, ts_after)
+        idx = bisect_right(ts_list, (ts_after, float("inf")))
         if idx < len(rows):
             return rows[idx]
         return None
@@ -2194,7 +2223,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
     if not rows:
         session.close()
         return
-    ts_list = [r.timestamp for r in rows]
+    ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
     today_date = date.today()
     start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
     if start_idx < 0:
@@ -2204,7 +2233,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
     def rebuild():
         nonlocal rows, ts_list
         rows = list(ledger_rows(session, plan_start, plan_end, [account_id]))
-        ts_list = [r.timestamp for r in rows]
+        ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
 
     def refresh(ts_current: datetime):
         rebuild()
@@ -2220,7 +2249,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
         if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
             plan_start = add_months(plan_start, -EXTEND_CHUNK_MONTHS)
             rebuild()
-        idx = bisect_left(ts_list, ts_before) - 1
+        idx = bisect_left(ts_list, (ts_before, -1)) - 1
         if idx >= 0:
             return rows[idx]
         return None
@@ -2230,7 +2259,7 @@ def open_account_ledger(stdscr, account_id: int) -> None:
         if (plan_end - ts_after.date()).days <= EDGE_TRIGGER_DAYS:
             plan_end = end_of_month(plan_end, EXTEND_CHUNK_MONTHS)
             rebuild()
-        idx = bisect_right(ts_list, ts_after)
+        idx = bisect_right(ts_list, (ts_after, float("inf")))
         if idx < len(rows):
             return rows[idx]
         return None
