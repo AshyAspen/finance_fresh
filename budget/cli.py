@@ -43,6 +43,9 @@ from .services import (
     delete_recurring_transfer,
     earliest_posted_tx_date,
     get_first_balance,
+    get_last_checkpoint,
+    set_checkpoint,
+    materialize_recurring_in_window,
     _posted_index_for_window,
     _overlaps_posted,
 )
@@ -1206,6 +1209,144 @@ def _show_balances(stdscr, lines: list[str]) -> None:
         win.getch()
 
 
+def last_reconcile_date(session, account_id: int) -> date:
+    cp = get_last_checkpoint(session, account_id)
+    if cp:
+        return cp.as_of_date
+    fb = get_first_balance(session, account_id)
+    if fb:
+        return fb.timestamp.date()
+    e = earliest_posted_tx_date(session, account_id)
+    return e or date.today()
+
+
+def projected_balance_on(session, account_id: int, as_of: date) -> float:
+    start_d = last_reconcile_date(session, account_id)
+    rows = [
+        r
+        for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
+        if r.timestamp.date() <= as_of
+    ]
+    return rows[-1].running_account if rows else 0.0
+
+
+def list_transactions_since_checkpoint(
+    session, account_id: int, start_d: date, end_d: date
+):
+    return (
+        session.query(Transaction)
+        .filter(Transaction.account_id == account_id)
+        .filter(Transaction.timestamp >= datetime.combine(start_d, time.min))
+        .filter(Transaction.timestamp <= datetime.combine(end_d, time.max))
+        .order_by(Transaction.timestamp.asc())
+        .all()
+    )
+
+
+def reconcile_screen(
+    stdscr,
+    session,
+    account_id: int,
+    start_d: date,
+    end_d: date,
+    entered_amount: float,
+) -> bool:
+    acct = session.get(Account, account_id)
+    index = 0
+    while True:
+        txns = list_transactions_since_checkpoint(session, account_id, start_d, end_d)
+        proj = projected_balance_on(session, account_id, end_d)
+        diff = entered_amount - proj
+        entries = [
+            f"{t.timestamp.strftime('%Y-%m-%d')} {t.description} {t.amount:+.2f}"
+            for t in txns
+        ]
+        if not entries:
+            entries = ["(none)"]
+
+        header = f"{acct.name} [{start_d}..{end_d}] entered {entered_amount:.2f}"
+        footer_left = "a Add  e Edit  r Recalc  c Confirm  q Cancel"
+        footer_right = f"Proj {proj:.2f} Diff {diff:+.2f}"
+
+        with temp_cursor(0), keypad_mode(stdscr):
+            h, w = stdscr.getmaxyx()
+            visible = max(1, h - 2)
+            top = 0
+            while True:
+                stdscr.erase()
+                try:
+                    stdscr.addnstr(0, 0, header, w - 1)
+                except curses.error:
+                    pass
+                top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+                for i in range(min(len(entries), visible)):
+                    line_idx = top + i
+                    line = entries[line_idx]
+                    attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                    try:
+                        stdscr.addnstr(1 + i, 0, line, w - 1, attr)
+                    except curses.error:
+                        pass
+                try:
+                    stdscr.addnstr(h - 1, 0, footer_left, w - 1)
+                    stdscr.addnstr(
+                        h - 1,
+                        max(0, w - len(footer_right)),
+                        footer_right,
+                        len(footer_right),
+                    )
+                except curses.error:
+                    pass
+                stdscr.refresh()
+                ch = stdscr.getch()
+                if ch == curses.KEY_UP and index > 0:
+                    index -= 1
+                elif ch == curses.KEY_DOWN and index < len(entries) - 1:
+                    index += 1
+                elif ch == curses.KEY_PPAGE:
+                    index = max(0, index - visible)
+                elif ch == curses.KEY_NPAGE:
+                    index = min(len(entries) - 1, index + visible)
+                elif ch in (curses.KEY_ENTER, 10, 13, ord("e")):
+                    if txns and index < len(txns):
+                        edit_transaction(stdscr, session, txns[index])
+                        session.commit()
+                    break
+                elif ch == ord("a"):
+                    from_acct = acct
+                    form = transaction_form(
+                        stdscr,
+                        session,
+                        from_acct,
+                        "",
+                        datetime.combine(end_d, time.min),
+                        0.0,
+                        None,
+                    )
+                    if form is not None:
+                        desc, ts, amt, to_acct = form
+                        if to_acct is None:
+                            create_transaction(session, from_acct.id, desc, amt, ts)
+                        else:
+                            create_transfer(
+                                session,
+                                from_acct.id,
+                                to_acct.id,
+                                amt,
+                                ts,
+                                desc,
+                            )
+                        session.commit()
+                    break
+                elif ch == ord("r"):
+                    break
+                elif ch == ord("c"):
+                    return True
+                elif ch == ord("q"):
+                    return False
+        # loop back to refresh after add/edit/recalc
+
+
 def set_balance(stdscr) -> None:
     """Prompt the user to store their current balance."""
     session = SessionLocal()
@@ -1214,7 +1355,6 @@ def set_balance(stdscr) -> None:
         if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
             acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
         else:
-            # Show existing balances for context
             scope_ids = (
                 CURRENT_ACCOUNT_IDS
                 if CURRENT_ACCOUNT_IDS is not None
@@ -1248,26 +1388,71 @@ def set_balance(stdscr) -> None:
             .first()
         )
         default_amt = f"{bal_row.amount:.2f}" if bal_row else None
-        ts_str = (
-            bal_row.timestamp.strftime("%Y-%m-%d")
-            if bal_row and bal_row.timestamp
-            else "n/a"
-        )
-        amount_str = text(
-            stdscr,
-            f"Balance for {acct.name} (last {ts_str})",
-            default=default_amt,
-        )
+        amount_str = text(stdscr, f"Balance for {acct.name}", default=default_amt)
         if amount_str is None:
             return
         try:
             amount = float(amount_str)
         except ValueError:
             return
+
+        try:
+            date_str = text(
+                stdscr,
+                "As of date (YYYY-MM-DD)",
+                default=date.today().strftime("%Y-%m-%d"),
+            )
+        except StopIteration:
+            date_str = None
+        if date_str:
+            try:
+                as_of = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                as_of = date.today()
+        else:
+            as_of = date.today()
+
+        first_bal = get_first_balance(session, acct.id)
+        if first_bal is None:
+            session.add(
+                Balance(
+                    amount=amount,
+                    timestamp=datetime.combine(as_of, time.min),
+                    account_id=acct.id,
+                )
+            )
+            session.commit()
+            set_checkpoint(session, acct.id, as_of)
+            return
+
+        start_d = last_reconcile_date(session, acct.id)
+        proj = projected_balance_on(session, acct.id, as_of)
+        if round(proj - amount, 2) == 0.0:
+            session.add(
+                Balance(
+                    amount=amount,
+                    timestamp=datetime.combine(as_of, time.min),
+                    account_id=acct.id,
+                )
+            )
+            session.commit()
+            set_checkpoint(session, acct.id, as_of)
+            return
+
+        ok = reconcile_screen(stdscr, session, acct.id, start_d, as_of, amount)
+        if not ok:
+            session.rollback()
+            return
+        materialize_recurring_in_window(session, start_d, as_of, [acct.id])
         session.add(
-            Balance(amount=amount, timestamp=datetime.utcnow(), account_id=acct.id)
+            Balance(
+                amount=amount,
+                timestamp=datetime.combine(as_of, time.min),
+                account_id=acct.id,
+            )
         )
         session.commit()
+        set_checkpoint(session, acct.id, as_of)
     finally:
         session.close()
 
