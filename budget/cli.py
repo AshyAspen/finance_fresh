@@ -1410,18 +1410,31 @@ def ledger_rows(
             return (20, 0) if amt > 0 else (30, 0)
         return (20, 0) if amt > 0 else (40, 0)
 
-    txns.sort(
-        key=lambda t: (
-            t.timestamp.date(),
-            classify_priority(t)[0],
-            classify_priority(t)[1],
-            getattr(t, "id", 0),
-            t.account_id,
-            t.description or "",
-            float(f"{abs(t.amount):.2f}"),
+    def _ledger_sort_key(t: Transaction):
+        prio, rank = classify_priority(t)
+        date_key = t.timestamp.date()
+        src_key = getattr(t, "_source_type", "posted") or "posted"
+        acct_key = t.account_id if t.account_id is not None else -1
+        id_key = t.id if t.id is not None else 0
+        desc_key = t.description or ""
+        amt_key = 0.0 if t.amount is None else float(f"{abs(t.amount):.2f}")
+        return (
+            date_key,
+            prio,
+            rank,
+            src_key,
+            acct_key,
+            id_key,
+            desc_key,
+            amt_key,
             t.timestamp,
         )
-    )
+
+    for t in txns:
+        assert t.timestamp is not None
+        assert isinstance(t.account_id if t.account_id is not None else -1, int)
+
+    txns.sort(key=_ledger_sort_key)
 
     def is_posted(t):
         return getattr(t, "_source_type", "posted") == "posted"
