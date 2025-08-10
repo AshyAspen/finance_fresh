@@ -1,9 +1,17 @@
 import itertools
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+import pytest
 
 from tests.helpers import get_temp_session
 from budget import cli
-from budget.models import Transaction, Balance, Recurring
+from budget.models import (
+    Account,
+    Transaction,
+    Balance,
+    Recurring,
+    IrregularCategory,
+    IrregularState,
+)
 from budget.services import occurrences_between
 
 
@@ -207,15 +215,12 @@ def test_ledger_view_displays_all_events(monkeypatch):
 
         captured = {}
 
-        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt, *args, **kwargs):
             rows = [initial_row]
             while True:
-                prev = get_prev(rows[0].timestamp)
-                if prev is None:
+                prev_row = get_prev(rows[0].timestamp)
+                if prev_row is None:
                     break
-                prev_row = cli.LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                )
                 rows.insert(0, prev_row)
                 if len(rows) >= 3:
                     break
@@ -445,21 +450,15 @@ def test_ledger_view_handles_multiple_recurring(monkeypatch):
 
         captured = {}
 
-        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+        def fake_curses(stdscr, initial_row, get_prev, get_next, bal_amt, *args, **kwargs):
             rows = [initial_row]
-            prev = get_prev(rows[0].timestamp)
-            if prev is not None:
-                prev_row = cli.LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                )
+            prev_row = get_prev(rows[0].timestamp)
+            if prev_row is not None:
                 rows.insert(0, prev_row)
             while len(rows) < 4:
-                nxt = get_next(rows[-1].timestamp)
-                if nxt is None:
+                next_row = get_next(rows[-1].timestamp)
+                if next_row is None:
                     break
-                next_row = cli.LedgerRow(
-                    nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                )
                 rows.append(next_row)
             captured["rows"] = rows
 
@@ -483,4 +482,160 @@ def test_ledger_view_handles_multiple_recurring(monkeypatch):
             running += r.amount
             assert r.running == running
     finally:
+        path.unlink()
+
+def test_per_account_offsets_match_stored_balance():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        a1 = Account(name="A", type="checking")
+        a2 = Account(name="B", type="checking")
+        session.add_all([a1, a2])
+        session.commit()
+
+        bal_a = Balance(amount=100.0, timestamp=datetime(2023, 1, 2), account_id=a1.id)
+        bal_b = Balance(amount=200.0, timestamp=datetime(2023, 1, 3), account_id=a2.id)
+        session.add_all([
+            bal_a,
+            bal_b,
+            Transaction(
+                description="preA",
+                amount=-20.0,
+                timestamp=datetime(2023, 1, 1),
+                account_id=a1.id,
+            ),
+            Transaction(
+                description="markA",
+                amount=0.0,
+                timestamp=datetime(2023, 1, 2),
+                account_id=a1.id,
+            ),
+            Transaction(
+                description="preB",
+                amount=50.0,
+                timestamp=datetime(2023, 1, 2),
+                account_id=a2.id,
+            ),
+            Transaction(
+                description="markB",
+                amount=0.0,
+                timestamp=datetime(2023, 1, 3),
+                account_id=a2.id,
+            ),
+        ])
+        session.commit()
+
+        rows = list(
+            cli.ledger_rows(
+                session,
+                date(2023, 1, 1),
+                date(2023, 1, 5),
+                [a1.id, a2.id],
+            )
+        )
+        last_by_acct = {}
+        bal_ts = {a1.id: date(2023, 1, 2), a2.id: date(2023, 1, 3)}
+        for r in rows:
+            if r.account_id in bal_ts and r.date <= bal_ts[r.account_id]:
+                last_by_acct[r.account_id] = r
+        assert last_by_acct[a1.id].running_account == pytest.approx(100.0, abs=0.01)
+        assert last_by_acct[a2.id].running_account == pytest.approx(200.0, abs=0.01)
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_overlap_consistency_multi_account():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        a1 = Account(name="A", type="checking")
+        a2 = Account(name="B", type="checking")
+        session.add_all([a1, a2])
+        session.commit()
+        session.add_all([
+            Balance(amount=0.0, timestamp=datetime(2023, 1, 1), account_id=a1.id),
+            Balance(amount=0.0, timestamp=datetime(2023, 1, 1), account_id=a2.id),
+            Transaction(
+                description="A Jan",
+                amount=100.0,
+                timestamp=datetime(2023, 1, 5),
+                account_id=a1.id,
+            ),
+            Transaction(
+                description="A Apr",
+                amount=-20.0,
+                timestamp=datetime(2023, 4, 5),
+                account_id=a1.id,
+            ),
+            Transaction(
+                description="B Feb",
+                amount=50.0,
+                timestamp=datetime(2023, 2, 5),
+                account_id=a2.id,
+            ),
+            Transaction(
+                description="B May",
+                amount=-10.0,
+                timestamp=datetime(2023, 5, 5),
+                account_id=a2.id,
+            ),
+        ])
+        session.commit()
+        start = date(2023, 1, 1)
+        rows_a = list(
+            cli.ledger_rows(session, start, date(2023, 3, 31), [a1.id, a2.id])
+        )
+        rows_b = list(
+            cli.ledger_rows(session, start, date(2023, 6, 30), [a1.id, a2.id])
+        )
+        rows_b_trim = [r for r in rows_b if r.date <= date(2023, 3, 31)]
+        assert [
+            (r.timestamp, r.account_id, r.description, r.amount, r.running_account, r.running_total)
+            for r in rows_a
+        ] == [
+            (r.timestamp, r.account_id, r.description, r.amount, r.running_account, r.running_total)
+            for r in rows_b_trim
+        ]
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_irregular_account_scope():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        a1 = Account(name="A", type="checking")
+        a2 = Account(name="B", type="checking")
+        session.add_all([a1, a2])
+        session.commit()
+        today = date.today()
+        session.add_all([
+            Balance(amount=0.0, timestamp=datetime.combine(today, datetime.min.time()), account_id=a1.id),
+            Balance(amount=0.0, timestamp=datetime.combine(today, datetime.min.time()), account_id=a2.id),
+            IrregularCategory(
+                name="Car",
+                account_id=a1.id,
+                state=IrregularState(
+                    avg_gap_days=30.0,
+                    median_amount=100.0,
+                    last_event_at=datetime.combine(today - timedelta(days=30), datetime.min.time()),
+                ),
+            ),
+        ])
+        session.commit()
+        rows = list(
+            cli.ledger_rows(
+                session,
+                today,
+                today + timedelta(days=60),
+                [a1.id, a2.id],
+            )
+        )
+        irregular_rows = [r for r in rows if r.description == "Irregular"]
+        assert irregular_rows, "expected irregular events for account A"
+        assert all(r.account_id == a1.id for r in irregular_rows)
+    finally:
+        session.close()
         path.unlink()

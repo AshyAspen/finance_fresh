@@ -22,7 +22,9 @@ def test_learn_state_minimum():
     cat = IrregularCategory(name="Groceries")
     session.add(cat)
     session.commit()
-    session.add(IrregularRule(category_id=cat.id, pattern="walmart"))
+    session.add(
+        IrregularRule(category_id=cat.id, account_id=cat.account_id, pattern="walmart")
+    )
     session.commit()
 
     random.seed(0)
@@ -146,7 +148,7 @@ def test_irregular_daily_series():
     start = date(2024, 1, 2)
     end = start + timedelta(days=59)
 
-    daily = dict(irregular_daily_series(session, start, end))
+    daily = dict(irregular_daily_series(session, start, end, account_id=cat.account_id))
     horizon = (end - start).days + 1
     series = [daily.get(start + timedelta(days=i), 0.0) for i in range(horizon)]
 
@@ -190,7 +192,9 @@ def test_merge_into_ledger(monkeypatch):
 
     start = fixed_today
     end = start + timedelta(days=30)
-    forecast = dict(irregular_daily_series(session, start, end))
+    forecast = dict(
+        irregular_daily_series(session, start, end, account_id=cat.account_id)
+    )
 
     rows = list(itertools.islice(cli.ledger_rows(session), len(forecast)))
     irregular_rows = {(r.date, r.amount) for r in rows if r.description == "Irregular"}

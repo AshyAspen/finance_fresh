@@ -15,17 +15,20 @@ def test_rules_for_and_match_category():
 
     session.add_all(
         [
-            IrregularRule(category_id=cat1.id, pattern="auto"),
-            IrregularRule(category_id=cat2.id, pattern="dentist"),
+            IrregularRule(
+                category_id=cat1.id, account_id=cat1.account_id, pattern="auto"
+            ),
+            IrregularRule(
+                category_id=cat2.id, account_id=cat2.account_id, pattern="dentist"
+            ),
         ]
     )
     session.commit()
 
     assert rules_for(session, cat1.id) == ["auto"]
-    assert match_category_id(session, "Paid AUTO shop") == cat1.id
-    assert match_category_id(session, "dentist appointment") == cat2.id
-    assert match_category_id(session, "unknown") is None
+    assert match_category_id(session, "Paid AUTO shop", 1) == cat1.id
+    assert match_category_id(session, "dentist appointment", 1) == cat2.id
+    assert match_category_id(session, "unknown", 1) is None
 
     session.close()
     db_path.unlink()
-

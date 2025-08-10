@@ -1,4 +1,5 @@
 """Command-line interface for budget app."""
+
 from __future__ import annotations
 
 from datetime import datetime, date, timedelta
@@ -8,13 +9,16 @@ from dataclasses import dataclass
 from bisect import bisect_left, bisect_right
 from curses import panel
 from contextlib import contextmanager
+from collections import defaultdict
 
-from .database import SessionLocal, init_db
+from .database import SessionLocal, init_db, ensure_default_account
+from sqlalchemy.exc import OperationalError
 from .models import (
     Transaction,
     Balance,
     Recurring,
     Goal,
+    Account,
     IrregularCategory,
     IrregularRule,
     IrregularState,
@@ -27,7 +31,17 @@ from .services_irregular import (
     update_irregular_state,
     get_or_create_state,
 )
-from .services import occurrences_between
+from .services import (
+    occurrences_between,
+    create_transaction,
+    create_transfer,
+    delete_transfer,
+    update_transfer,
+    max_safe_payment_today,
+    create_recurring_transfer,
+    update_recurring_transfer,
+    delete_recurring_transfer,
+)
 
 FREQUENCIES = [
     "weekly",
@@ -46,6 +60,8 @@ IRREG_QUANTILE = "p80"
 INITIAL_FORWARD_MONTHS = 18
 EXTEND_CHUNK_MONTHS = 6
 EDGE_TRIGGER_DAYS = 14
+
+CURRENT_ACCOUNT_IDS: list[int] | None = None  # None means "All Accounts"
 
 
 def select(stdscr, message, choices, default=None, boxed=True):
@@ -72,19 +88,73 @@ def select(stdscr, message, choices, default=None, boxed=True):
             default_idx = idx
 
     with SessionLocal() as s:
-        bal = s.get(Balance, 1)
-        bal_amt = bal.amount if bal else 0.0
+        footer_right = ""
+        if CURRENT_ACCOUNT_IDS is None:
+            accts = list_accounts(s)
+        else:
+            accts = (
+                s.query(Account)
+                .filter(Account.id.in_(CURRENT_ACCOUNT_IDS))
+                .order_by(Account.name)
+                .all()
+            )
+        if accts:
+            if len(accts) == 1:
+                acct = accts[0]
+                bal_row = (
+                    s.query(Balance)
+                    .filter(Balance.account_id == acct.id)
+                    .order_by(Balance.timestamp.desc())
+                    .first()
+                )
+                amt = bal_row.amount if bal_row else 0.0
+                ts = (
+                    bal_row.timestamp.strftime("%Y-%m-%d")
+                    if bal_row and bal_row.timestamp
+                    else "n/a"
+                )
+                footer_right = f"{acct.name}: {amt:.2f} @ {ts}"
+            else:
+                parts: list[str] = []
+                for acct in accts:
+                    bal_row = (
+                        s.query(Balance)
+                        .filter(Balance.account_id == acct.id)
+                        .order_by(Balance.timestamp.desc())
+                        .first()
+                    )
+                    amt = bal_row.amount if bal_row else 0.0
+                    parts.append(f"{acct.name}:{amt:.2f}")
+                footer_right = "; ".join(parts)
+
     selected = scroll_menu(
         stdscr,
         titles,
         default_idx,
         header=message,
-        footer_right=f"{bal_amt:.2f}",
+        footer_right=footer_right,
         boxed=boxed,
     )
     if selected is None:
         return None
     return values[selected]
+
+
+def list_accounts(session):
+    return (
+        session.query(Account)
+        .filter(Account.archived == False)
+        .order_by(Account.name)
+        .all()
+    )
+
+
+def pick_account(stdscr, session, prompt="Select account", default=None):
+    accts = list_accounts(session)
+    if not accts:
+        return None
+    choice = select(stdscr, prompt, [(a.name, a) for a in accts], default=default)
+    return choice
 
 
 def _center_box(stdscr, height: int, width: int) -> "curses.window":
@@ -182,6 +252,7 @@ def show_key_help(stdscr, bindings):
             pass
         win.getch()
 
+
 def text(stdscr, message, default=None):
     with temp_cursor(1), keypad_mode(stdscr):
         h, w = stdscr.getmaxyx()
@@ -249,34 +320,45 @@ def toast(stdscr, msg: str, ms: int = 900):
 
 
 def transaction_form(
-    stdscr, description: str, timestamp: datetime, amount: float
+    stdscr,
+    session,
+    from_acct: Account,
+    description: str,
+    timestamp: datetime,
+    amount: float,
+    to_acct: Account | None = None,
 ):
-    """Interactive form for editing transaction fields.
+    """Interactive form for adding/editing transactions with optional transfer.
 
-    Returns ``(description, timestamp, amount)`` if saved, otherwise ``None``.
+    Returns ``(description, timestamp, amount, to_acct)`` if saved, otherwise ``None``.
     """
 
+    default = "name"
     while True:
+        to_label = to_acct.name if to_acct else "Outgoing transaction"
         choice = select(
             stdscr,
             "Select field to edit",
             choices=[
-                (f"Name: {description}", "description"),
+                (f"From: {from_acct.name}", "from"),
                 (f"Date: {timestamp.strftime('%Y-%m-%d')}", "date"),
+                (f"Name: {description}", "name"),
                 (f"Amount: {amount}", "amount"),
+                (f"To: {to_label}", "to"),
                 ("Save", "save"),
                 ("Cancel", "cancel"),
             ],
+            default=default,
         )
 
-        if choice == "description":
-            new_desc = text(stdscr, "Description", default=description)
+        if choice == "name":
+            new_desc = text(stdscr, "Name", default=description)
             if new_desc is not None:
                 description = new_desc
+            default = "amount"
         elif choice == "date":
             date_str = text(
-                stdscr,
-                "Date (YYYY-MM-DD)", default=timestamp.strftime("%Y-%m-%d")
+                stdscr, "Date (YYYY-MM-DD)", default=timestamp.strftime("%Y-%m-%d")
             )
             if date_str is not None:
                 try:
@@ -290,89 +372,363 @@ def transaction_form(
                     amount = float(amount_str)
                 except ValueError:
                     pass
+            default = "save"
+        elif choice == "to":
+            accts = (
+                session.query(Account)
+                .filter(Account.archived == False, Account.id != from_acct.id)
+                .order_by(Account.name)
+                .all()
+            )
+            if accts:
+                picked = select(
+                    stdscr, "To account", [(a.name, a) for a in accts], default=to_acct
+                )
+                to_acct = picked
         elif choice == "save":
-            return description, timestamp, amount
+            return description, timestamp, amount, to_acct
+        elif choice == "from":
+            continue
         else:
             return None
 
 
 def add_transaction(stdscr) -> None:
     """Prompt user for transaction data and persist it."""
-    form = transaction_form(stdscr, "", datetime.utcnow(), 0.0)
-    if form is None:
-        return
-    description, timestamp, amount = form
     session = SessionLocal()
-    txn = Transaction(description=description, amount=amount, timestamp=timestamp)
-    session.add(txn)
-    session.commit()
+    try:
+        default_acct = None
+        if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+            default_acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+        from_acct = pick_account(stdscr, session, "From account", default=default_acct)
+        if from_acct is None:
+            return
 
-    category_id = match_category_id(session, txn.description)
-    if category_id is not None:
-        state = get_or_create_state(session, category_id)
-        update_irregular_state(state, txn)
-        session.commit()
-        cat = session.get(IrregularCategory, category_id)
-        if cat is not None:
-            avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
-            med = state.median_amount if state.median_amount is not None else 0.0
-            toast(
-                stdscr,
-                f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
+        form = transaction_form(
+            stdscr, session, from_acct, "", datetime.utcnow(), 0.0, None
+        )
+        if form is None:
+            return
+        description, timestamp, amount, to_acct = form
+        if to_acct is None:
+            txn = create_transaction(
+                session, from_acct.id, description, amount, timestamp
             )
+        else:
+            create_transfer(
+                session, from_acct.id, to_acct.id, amount, timestamp, description
+            )
+            txn = None
 
+        if txn is not None:
+            category_id = match_category_id(session, txn.description, txn.account_id)
+            if category_id is not None:
+                state = get_or_create_state(session, category_id)
+                update_irregular_state(state, txn)
+                session.commit()
+                cat = session.get(IrregularCategory, category_id)
+                if cat is not None:
+                    avg = state.avg_gap_days if state.avg_gap_days is not None else 0.0
+                    med = (
+                        state.median_amount if state.median_amount is not None else 0.0
+                    )
+                    toast(
+                        stdscr,
+                        f"Updated \u2018{cat.name}\u2019: avg gap \u2192 {avg:.1f} days, median \u2192 ${med:.2f}",
+                    )
+    finally:
+        session.close()
+
+
+
+def max_payment_today_menu(stdscr) -> None:
+    """Compute the maximum safe extra payment for today."""
+
+    session = SessionLocal()
+    accounts = (
+        session.query(Account).filter(Account.archived == False).order_by(Account.name).all()
+    )
+    if not accounts:
+        session.close()
+        return
+
+    target_name = select(stdscr, "Target account", [a.name for a in accounts])
+    if target_name is None:
+        session.close()
+        return
+    target = next(a for a in accounts if a.name == target_name)
+
+    buf_str = text(stdscr, "Buffer per account", default="100")
+    if buf_str is None:
+        session.close()
+        return
+    try:
+        buf_val = float(buf_str)
+    except ValueError:
+        buf_val = 0.0
+    buffer_by_account = {acc.id: buf_val for acc in accounts}
+
+    amt = max_safe_payment_today(
+        session, target.id, buffer_by_account, horizon_days=120
+    )
     session.close()
+    toast(stdscr, f"You can safely pay ${amt:.2f} to {target.name} today.")
+
+
+def accounts_menu(stdscr) -> None:
+    global CURRENT_ACCOUNT_IDS
+    session = SessionLocal()
+    ensure_default_account(session)
+    try:
+        while True:
+            choice = select(
+                stdscr,
+                "Accounts",
+                [
+                    "All Accounts",
+                    "New Account",
+                    "Rename Account",
+                    "Delete Account",
+                    "Select Single Account",
+                    "Back",
+                ],
+                boxed=False,
+            )
+            if choice == "All Accounts":
+                CURRENT_ACCOUNT_IDS = None
+            elif choice == "New Account":
+                name = text(stdscr, "Account name")
+                if name is None:
+                    continue
+                acc_type = select(
+                    stdscr,
+                    "Account type",
+                    ["checking", "savings", "credit_card", "loan"],
+                )
+                if acc_type is None:
+                    continue
+                session.add(Account(name=name, type=acc_type))
+                session.commit()
+            elif choice == "Rename Account":
+                acct = pick_account(stdscr, session, "Rename which account")
+                if acct:
+                    new_name = text(stdscr, "New name", acct.name)
+                    if new_name is not None:
+                        acct.name = new_name
+                        session.commit()
+            elif choice == "Delete Account":
+                acct = pick_account(stdscr, session, "Delete which account")
+                if acct:
+                    has_tx = (
+                        session.query(Transaction)
+                        .filter_by(account_id=acct.id)
+                        .first()
+                        is not None
+                    )
+                    if has_tx and not confirm(
+                        stdscr, "Account has transactions; delete anyway?"
+                    ):
+                        continue
+                    session.delete(acct)
+                    session.commit()
+                    if CURRENT_ACCOUNT_IDS and acct.id in CURRENT_ACCOUNT_IDS:
+                        CURRENT_ACCOUNT_IDS = None
+            elif choice == "Select Single Account":
+                acct = pick_account(stdscr, session, "Select account")
+                if acct:
+                    CURRENT_ACCOUNT_IDS = [acct.id]
+            else:
+                break
+    finally:
+        session.close()
+
+
+def recurring_form(
+    stdscr,
+    session,
+    from_acct: Account,
+    description: str,
+    start: datetime,
+    amount: float,
+    to_acct: Account | None,
+    freq: str,
+):
+    """Interactive form for adding/editing recurring bills/incomes."""
+
+    default = "name"
+    while True:
+        to_label = to_acct.name if to_acct else "Outgoing transaction"
+        choice = select(
+            stdscr,
+            "Select field to edit",
+            choices=[
+                (f"From: {from_acct.name}", "from"),
+                (f"Date: {start.strftime('%Y-%m-%d')}", "date"),
+                (f"Name: {description}", "name"),
+                (f"Amount: {amount}", "amount"),
+                (f"To: {to_label}", "to"),
+                (f"Recurring: {freq}", "recurring"),
+                ("Save", "save"),
+                ("Cancel", "cancel"),
+            ],
+            default=default,
+        )
+
+        if choice == "name":
+            new_desc = text(stdscr, "Name", default=description)
+            if new_desc is not None:
+                description = new_desc
+            default = "amount"
+        elif choice == "date":
+            date_str = text(
+                stdscr, "Date (YYYY-MM-DD)", default=start.strftime("%Y-%m-%d")
+            )
+            if date_str is not None:
+                try:
+                    start = datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    pass
+        elif choice == "amount":
+            amount_str = text(stdscr, "Amount", default=str(amount))
+            if amount_str is not None:
+                try:
+                    amount = float(amount_str)
+                except ValueError:
+                    pass
+            default = "recurring"
+        elif choice == "to":
+            accts = (
+                session.query(Account)
+                .filter(Account.archived == False, Account.id != from_acct.id)
+                .order_by(Account.name)
+                .all()
+            )
+            if accts:
+                to_acct = select(
+                    stdscr, "To account", [(a.name, a) for a in accts], default=to_acct
+                )
+        elif choice == "recurring":
+            picked = select(
+                stdscr, "Frequency", FREQUENCIES, default=freq
+            )
+            if picked is not None:
+                freq = picked
+            default = "save"
+        elif choice == "save":
+            return description, start, amount, to_acct, freq
+        elif choice == "from":
+            continue
+        else:
+            return None
 
 
 def add_recurring(stdscr, is_income: bool, existing: Recurring | None = None) -> None:
     """Prompt user to add or edit a recurring bill or income."""
 
-    name = text(stdscr, "Name", default=existing.description if existing else None)
-    if name is None:
-        return
-    date_str = text(
-        stdscr,
-        "Start date (YYYY-MM-DD)",
-        default=existing.start_date.strftime("%Y-%m-%d") if existing else None,
-    )
-    if date_str is None:
-        return
-    amount_str = text(
-        stdscr,
-        "Amount",
-        default=str(abs(existing.amount)) if existing else None,
-    )
-    if amount_str is None:
-        return
-    freq = select(
-        stdscr,
-        "Frequency",
-        FREQUENCIES,
-        default=existing.frequency if existing else None,
-    )
-    try:
-        start = datetime.strptime(date_str, "%Y-%m-%d")
-        amount = float(amount_str)
-    except ValueError:
-        return
-    amount = abs(amount) if is_income else -abs(amount)
     session = SessionLocal()
-    if existing is None:
-        rec = Recurring(
-            description=name, amount=amount, start_date=start, frequency=freq
-        )
-        session.add(rec)
-    else:
-        rec = session.get(Recurring, existing.id)
-        if rec is None:
-            session.close()
+    try:
+        if existing is not None:
+            default_acct = session.get(Account, existing.account_id)
+        elif CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+            default_acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+        else:
+            default_acct = None
+        from_acct = pick_account(stdscr, session, "From account", default=default_acct)
+        if from_acct is None:
             return
-        rec.description = name
-        rec.amount = amount
-        rec.start_date = start
-        rec.frequency = freq
-    session.commit()
-    session.close()
+        description = existing.description if existing else ""
+        start = existing.start_date if existing else datetime.utcnow()
+        amount = abs(existing.amount) if existing else 0.0
+        freq = existing.frequency if existing else "monthly"
+        to_acct = None
+        if existing and existing.transfer_id:
+            other = (
+                session.query(Recurring)
+                .filter(Recurring.transfer_id == existing.transfer_id, Recurring.id != existing.id)
+                .first()
+            )
+            if other:
+                to_acct = session.get(Account, other.account_id)
+
+        form = recurring_form(
+            stdscr, session, from_acct, description, start, amount, to_acct, freq
+        )
+        if form is None:
+            return
+        description, start, amount, to_acct, freq = form
+
+        if existing is None:
+            if to_acct is None:
+                amt = abs(amount) if is_income else -abs(amount)
+                rec = Recurring(
+                    description=description,
+                    amount=amt,
+                    start_date=start,
+                    frequency=freq,
+                    account_id=from_acct.id,
+                )
+                session.add(rec)
+                session.commit()
+            else:
+                create_recurring_transfer(
+                    session,
+                    from_acct.id,
+                    to_acct.id,
+                    amount,
+                    start,
+                    freq,
+                    description,
+                )
+        else:
+            rec = session.get(Recurring, existing.id)
+            if rec is None:
+                return
+            if rec.transfer_id:
+                if to_acct is None:
+                    delete_recurring_transfer(session, rec.transfer_id)
+                    amt = abs(amount) if is_income else -abs(amount)
+                    rec = Recurring(
+                        description=description,
+                        amount=amt,
+                        start_date=start,
+                        frequency=freq,
+                        account_id=from_acct.id,
+                    )
+                    session.add(rec)
+                    session.commit()
+                else:
+                    update_recurring_transfer(
+                        session,
+                        rec.transfer_id,
+                        description,
+                        amount,
+                        start,
+                        freq,
+                        from_acct.id,
+                        to_acct.id,
+                    )
+            else:
+                if to_acct is None:
+                    rec.description = description
+                    rec.amount = abs(amount) if is_income else -abs(amount)
+                    rec.start_date = start
+                    rec.frequency = freq
+                    rec.account_id = from_acct.id
+                    session.commit()
+                else:
+                    session.delete(rec)
+                    session.commit()
+                    create_recurring_transfer(
+                        session,
+                        from_acct.id,
+                        to_acct.id,
+                        amount,
+                        start,
+                        freq,
+                        description,
+                    )
+    finally:
+        session.close()
 
 
 def goal_form(
@@ -404,8 +760,7 @@ def goal_form(
                 description = new_desc
         elif choice == "date":
             date_str = text(
-                stdscr,
-                "Date (YYYY-MM-DD)", default=target_date.strftime("%Y-%m-%d")
+                stdscr, "Date (YYYY-MM-DD)", default=target_date.strftime("%Y-%m-%d")
             )
             if date_str is not None:
                 try:
@@ -478,7 +833,11 @@ def edit_recurring(stdscr, is_income: bool) -> None:
         amt_w = max((len(f"{r.amount:.2f}") for r in recs), default=0)
         entries = []
         for r in recs:
-            anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+            anchor = (
+                r.start_date.date()
+                if isinstance(r.start_date, datetime)
+                else r.start_date
+            )
             next_occ = occurrences_between(
                 anchor, r.frequency, date.today(), date.today() + timedelta(days=365)
             )
@@ -504,8 +863,11 @@ def edit_recurring(stdscr, is_income: bool) -> None:
             if del_idx < len(recs):
                 rec = recs[del_idx]
                 if confirm(stdscr, "Delete this item?"):
-                    session.delete(rec)
-                    session.commit()
+                    if rec.transfer_id:
+                        delete_recurring_transfer(session, rec.transfer_id)
+                    else:
+                        session.delete(rec)
+                        session.commit()
             session.close()
             session = SessionLocal()
             continue
@@ -526,14 +888,30 @@ def edit_recurring(stdscr, is_income: bool) -> None:
 
 def edit_transaction(stdscr, session, txn: Transaction) -> None:
     """Edit an existing transaction in-place."""
-    form = transaction_form(stdscr, txn.description, txn.timestamp, txn.amount)
+    from_acct = session.get(Account, txn.account_id)
+    to_acct = None
+    if txn.transfer_id:
+        other = (
+            session.query(Transaction)
+            .filter(Transaction.transfer_id == txn.transfer_id, Transaction.id != txn.id)
+            .first()
+        )
+        if other:
+            to_acct = session.get(Account, other.account_id)
+    amt = abs(txn.amount) if txn.transfer_id else txn.amount
+    form = transaction_form(
+        stdscr, session, from_acct, txn.description, txn.timestamp, amt, to_acct
+    )
     if form is None:
         return
-    description, timestamp, amount = form
-    txn.description = description
-    txn.timestamp = timestamp
-    txn.amount = amount
-    session.commit()
+    description, timestamp, amount, _ = form
+    if txn.transfer_id:
+        update_transfer(session, txn.transfer_id, description, amount, timestamp)
+    else:
+        txn.description = description
+        txn.timestamp = timestamp
+        txn.amount = amount
+        session.commit()
 
 
 def list_transactions(stdscr) -> None:
@@ -565,8 +943,11 @@ def list_transactions(stdscr) -> None:
             if del_idx < len(txns):
                 txn = txns[del_idx]
                 if confirm(stdscr, "Delete this transaction?"):
-                    session.delete(txn)
-                    session.commit()
+                    if txn.transfer_id:
+                        delete_transfer(session, txn.transfer_id)
+                    else:
+                        session.delete(txn)
+                        session.commit()
             session.close()
             session = SessionLocal()
             continue
@@ -583,25 +964,88 @@ def list_transactions(stdscr) -> None:
     session.close()
 
 
+def _show_balances(stdscr, lines: list[str]) -> None:
+    if not lines:
+        return
+    width = max(len(line) for line in lines) + 4
+    height = len(lines) + 2
+    with modal_box(stdscr, height, width) as win:
+        for idx, line in enumerate(lines, start=1):
+            try:
+                win.addnstr(idx, 2, line, width - 4)
+            except curses.error:
+                pass
+        try:
+            win.refresh()
+        except curses.error:
+            pass
+        win.getch()
+
+
 def set_balance(stdscr) -> None:
     """Prompt the user to store their current balance."""
-    amount_str = text(stdscr, "Current balance")
-    if amount_str is None:
-        return
-    try:
-        amount = float(amount_str)
-    except ValueError:
-        return
     session = SessionLocal()
-    bal = session.get(Balance, 1)
-    if bal is None:
-        bal = Balance(id=1, amount=amount, timestamp=datetime.utcnow())
-        session.add(bal)
-    else:
-        bal.amount = amount
-        bal.timestamp = datetime.utcnow()
-    session.commit()
-    session.close()
+    try:
+        acct: Account | None
+        if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+            acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+        else:
+            # Show existing balances for context
+            scope_ids = (
+                CURRENT_ACCOUNT_IDS
+                if CURRENT_ACCOUNT_IDS is not None
+                else [a.id for a in list_accounts(session)]
+            )
+            lines: list[str] = []
+            for aid in scope_ids:
+                a = session.get(Account, aid)
+                bal_row = (
+                    session.query(Balance)
+                    .filter(Balance.account_id == aid)
+                    .order_by(Balance.timestamp.desc())
+                    .first()
+                )
+                amt = bal_row.amount if bal_row else 0.0
+                ts = (
+                    bal_row.timestamp.strftime("%Y-%m-%d")
+                    if bal_row and bal_row.timestamp
+                    else "n/a"
+                )
+                lines.append(f"{a.name}: {amt:.2f} @ {ts}")
+            _show_balances(stdscr, lines)
+            acct = pick_account(stdscr, session, "Balance for account")
+        if acct is None:
+            return
+
+        bal_row = (
+            session.query(Balance)
+            .filter(Balance.account_id == acct.id)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
+        default_amt = f"{bal_row.amount:.2f}" if bal_row else None
+        ts_str = (
+            bal_row.timestamp.strftime("%Y-%m-%d")
+            if bal_row and bal_row.timestamp
+            else "n/a"
+        )
+        amount_str = text(
+            stdscr,
+            f"Balance for {acct.name} (last {ts_str})",
+            default=default_amt,
+        )
+        if amount_str is None:
+            return
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            return
+        session.add(
+            Balance(amount=amount, timestamp=datetime.utcnow(), account_id=acct.id)
+        )
+        session.commit()
+    finally:
+        session.close()
 
 
 def settings_help_menu(stdscr) -> None:
@@ -771,7 +1215,9 @@ def next_event(after: datetime, txns, recs):
     for i, r in enumerate(recs):
         occ = occurrence_on_or_before(r.start_date.date(), r.frequency, after.date())
         if occ is not None:
-            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=i)
+            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(
+                microseconds=i
+            )
             if occ_dt > after and (next_rec_time is None or occ_dt < next_rec_time):
                 next_rec_time = occ_dt
                 next_rec = r
@@ -785,7 +1231,9 @@ def next_event(after: datetime, txns, recs):
             next_rec = r
     if next_txn is None and next_rec is None:
         return None
-    if next_txn is not None and (next_rec_time is None or next_txn.timestamp <= next_rec_time):
+    if next_txn is not None and (
+        next_rec_time is None or next_txn.timestamp <= next_rec_time
+    ):
         return next_txn.timestamp, next_txn.description, next_txn.amount
     return next_rec_time, next_rec.description, next_rec.amount
 
@@ -801,20 +1249,26 @@ def prev_event(before: datetime, txns, recs):
     for i, r in enumerate(recs):
         occ = occurrence_on_or_before(r.start_date.date(), r.frequency, before.date())
         if occ is not None:
-            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(microseconds=i)
+            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(
+                microseconds=i
+            )
             if occ_dt >= before:
                 occ_prev = occurrence_on_or_before(
                     r.start_date.date(), r.frequency, before.date() - timedelta(days=1)
                 )
                 if occ_prev is None:
                     continue
-                occ_dt = datetime.combine(occ_prev, datetime.min.time()) + timedelta(microseconds=i)
+                occ_dt = datetime.combine(occ_prev, datetime.min.time()) + timedelta(
+                    microseconds=i
+                )
             if occ_dt < before and (prev_rec_time is None or occ_dt > prev_rec_time):
                 prev_rec_time = occ_dt
                 prev_rec = r
     if prev_txn is None and prev_rec is None:
         return None
-    if prev_txn is not None and (prev_rec_time is None or prev_txn.timestamp >= prev_rec_time):
+    if prev_txn is not None and (
+        prev_rec_time is None or prev_txn.timestamp >= prev_rec_time
+    ):
         return prev_txn.timestamp, prev_txn.description, prev_txn.amount
     return prev_rec_time, prev_rec.description, prev_rec.amount
 
@@ -822,13 +1276,19 @@ def prev_event(before: datetime, txns, recs):
 @dataclass
 class LedgerRow:
     timestamp: datetime
+    account_id: int
     description: str
     amount: float
-    running: float
+    running_account: float
+    running_total: float
 
     @property
     def date(self) -> date:
         return self.timestamp.date()
+
+    @property
+    def running(self) -> float:
+        return self.running_account
 
 
 def add_months(d: date, months: int) -> date:
@@ -844,25 +1304,63 @@ def end_of_month(d: date, months: int = 0) -> date:
     return date(d.year, d.month, last)
 
 
-def ledger_rows(session, plan_start: date | None = None, plan_end: date | None = None):
-    bal = session.get(Balance, 1)
-    bal_amt = bal.amount if bal else 0.0
-    bal_ts = bal.timestamp if bal and bal.timestamp else datetime.combine(date.today(), datetime.min.time())
+def ledger_rows(
+    session,
+    plan_start: date | None = None,
+    plan_end: date | None = None,
+    account_ids: list[int] | None = None,
+):
+    if account_ids is None:
+        ids = set()
+        ids.update(a for (a,) in session.query(Transaction.account_id).distinct())
+        ids.update(a for (a,) in session.query(Recurring.account_id).distinct())
+        ids.update(a for (a,) in session.query(Balance.account_id).distinct())
+        account_ids = sorted(ids)
+    if not account_ids:
+        account_ids = [ensure_default_account(session).id]
+
+    bal_map: dict[int, tuple[float, datetime]] = {}
+    for aid in account_ids:
+        row = (
+            session.query(Balance)
+            .filter(Balance.account_id == aid)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
+        amt = row.amount if row else 0.0
+        ts = (
+            row.timestamp
+            if row and row.timestamp
+            else datetime.combine(date.today(), datetime.min.time())
+        )
+        bal_map[aid] = (amt, ts)
+
+    min_bal_date = min(ts.date() for _, ts in bal_map.values())
 
     if plan_start is None or plan_end is None:
-        earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
-        earliest_date = earliest_tx.timestamp.date() if earliest_tx else bal_ts.date()
-        plan_start = min(earliest_date, bal_ts.date())
+        earliest_tx = (
+            session.query(Transaction)
+            .filter(Transaction.account_id.in_(account_ids))
+            .order_by(Transaction.timestamp)
+            .first()
+        )
+        earliest_date = earliest_tx.timestamp.date() if earliest_tx else min_bal_date
+        plan_start = min(earliest_date, min_bal_date)
         plan_end = date.today() + timedelta(days=3650)  # ~10 years
 
-    # real transactions
-    txns = session.query(Transaction).order_by(Transaction.timestamp).all()
+    txns = (
+        session.query(Transaction)
+        .filter(Transaction.account_id.in_(account_ids))
+        .order_by(Transaction.timestamp)
+        .all()
+    )
 
-    # synthetic recurring transactions across horizon (base set)
-    recs = session.query(Recurring).all()
+    recs = session.query(Recurring).filter(Recurring.account_id.in_(account_ids)).all()
     synthetic_txns: list[Transaction] = []
     for r in recs:
-        anchor = r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+        anchor = (
+            r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
+        )
         occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
         for occ in occs:
             synthetic_txns.append(
@@ -875,25 +1373,27 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             )
     txns.extend(synthetic_txns)
 
-    # irregular forecast within planning window (appended after base set)
-    irr_start = max(date.today(), bal_ts.date())
-    irr_forecast = irregular_daily_series(
-        session,
-        irr_start,
-        plan_end,
-        mode=IRREG_MODE,
-        quantile=IRREG_QUANTILE,
-    )
+    irr_start = max(date.today(), min_bal_date)
     irr_series: list[Transaction] = []
-    for d, amt in irr_forecast:
-        if amt:
-            irr_series.append(
-                Transaction(
-                    description="Irregular",
-                    amount=-amt,
-                    timestamp=datetime.combine(d, datetime.min.time()),
+    for aid in account_ids:
+        irr_forecast = irregular_daily_series(
+            session,
+            irr_start,
+            plan_end,
+            account_id=aid,
+            mode=IRREG_MODE,
+            quantile=IRREG_QUANTILE,
+        )
+        for d, amt in irr_forecast:
+            if amt:
+                irr_series.append(
+                    Transaction(
+                        description="Irregular",
+                        amount=-amt,
+                        timestamp=datetime.combine(d, datetime.min.time()),
+                        account_id=aid,
+                    )
                 )
-            )
     txns.extend(irr_series)
 
     for t in synthetic_txns:
@@ -902,7 +1402,7 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
         setattr(t, "_source_type", "irregular")
 
     def classify_priority(t):
-        src = getattr(t, "_source_type", "posted")  # posted|recurring|irregular
+        src = getattr(t, "_source_type", "posted")
         amt = t.amount or 0.0
         if src == "irregular":
             return (50, 0)
@@ -910,63 +1410,96 @@ def ledger_rows(session, plan_start: date | None = None, plan_end: date | None =
             return (20, 0) if amt > 0 else (30, 0)
         return (20, 0) if amt > 0 else (40, 0)
 
-    txns.sort(
-        key=lambda t: (
-            t.timestamp.date(),
-            classify_priority(t)[0],
-            classify_priority(t)[1],
-            getattr(t, "id", 0),
-            t.description or "",
-            float(f"{abs(t.amount):.2f}"),
+    def _ledger_sort_key(t: Transaction):
+        prio, rank = classify_priority(t)
+        date_key = t.timestamp.date()
+        src_key = getattr(t, "_source_type", "posted") or "posted"
+        acct_key = t.account_id if t.account_id is not None else -1
+        id_key = t.id if t.id is not None else 0
+        desc_key = t.description or ""
+        amt_key = 0.0 if t.amount is None else float(f"{abs(t.amount):.2f}")
+        return (
+            date_key,
+            prio,
+            rank,
+            src_key,
+            acct_key,
+            id_key,
+            desc_key,
+            amt_key,
             t.timestamp,
         )
-    )
 
-    # compute offset so running balance matches stored balance at bal_ts
+    for t in txns:
+        assert t.timestamp is not None
+        assert isinstance(t.account_id if t.account_id is not None else -1, int)
+
+    txns.sort(key=_ledger_sort_key)
+
     def is_posted(t):
         return getattr(t, "_source_type", "posted") == "posted"
 
-    total_before = 0.0
-    for t in txns:
-        if t.timestamp <= bal_ts and is_posted(t):
-            total_before += t.amount
-    offset = bal_amt - total_before
+    offset: dict[int, float] = {}
+    for aid, (bal_amt, bal_ts) in bal_map.items():
+        total_before = 0.0
+        for t in txns:
+            if t.account_id == aid and t.timestamp <= bal_ts and is_posted(t):
+                total_before += t.amount
+        offset[aid] = bal_amt - total_before
 
-    def effective_amount(t):
-        # For dates on/before bal_ts, ignore synthetic (recurring/irregular) amounts.
+    total_offset = sum(offset.values())
+
+    def effective_amount(t: Transaction) -> float:
+        bal_ts = bal_map[t.account_id][1]
         if t.timestamp <= bal_ts and not is_posted(t):
             return 0.0
         return t.amount
 
-    running = 0.0
+    running_by_acct: defaultdict[int, float] = defaultdict(float)
     last_ts: datetime | None = None
     bump = 0
     for t in txns:
         if not (plan_start <= t.timestamp.date() <= plan_end):
             continue
+        assert t.account_id in account_ids
         if t.timestamp == last_ts:
             bump += 1
         else:
             last_ts = t.timestamp
             bump = 0
-        running += effective_amount(t)
+        running_by_acct[t.account_id] += effective_amount(t)
+        running_account = running_by_acct[t.account_id] + offset[t.account_id]
+        running_total = sum(running_by_acct.values()) + total_offset
         yield LedgerRow(
             t.timestamp + timedelta(microseconds=bump),
+            t.account_id,
             t.description,
             t.amount,
-            running + offset,
+            running_account,
+            running_total,
         )
 
 
-def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
+def ledger_curses(
+    stdscr, initial_row, get_prev, get_next, bal_amt, account_names, multi
+):
     global IRREG_MODE, IRREG_QUANTILE
     rows = [initial_row]
     index = 0
 
     with temp_cursor(0), keypad_mode(stdscr):
-        desc_w = len(initial_row.description)
-        amt_w = len(f"{initial_row.amount:.2f}")
-        run_w = len(f"{initial_row.running:.2f}")
+        if multi:
+            acct_w = max(len("Account"), max(len(n) for n in account_names.values()))
+            desc_w = max(len("Description"), len(initial_row.description))
+            amt_w = max(len("Amount"), len(f"{initial_row.amount:.2f}"))
+            run_w = max(len("Balance (Acct)"), len(f"{initial_row.running_account:.2f}"))
+            tot_w = max(len("Balance (Total)"), len(f"{initial_row.running_total:.2f}"))
+        else:
+            desc_w = max(len("Description"), len(initial_row.description))
+            amt_w = max(len("Amount"), len(f"{initial_row.amount:.2f}"))
+            run_w = max(len("Balance"), len(f"{initial_row.running_account:.2f}"))
+            acct_w = 0
+            tot_w = 0
         mode_label = (
             "Deterministic"
             if IRREG_MODE == "deterministic"
@@ -978,49 +1511,75 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
-            visible = h - 1
+            visible = h - 2 if multi else h - 1
 
             while index < visible // 2:
-                prev = get_prev(rows[0].timestamp)
-                if prev is None:
+                prev_row = get_prev(rows[0].timestamp)
+                if prev_row is None:
                     break
-                prev_row = LedgerRow(
-                    prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                )
                 rows.insert(0, prev_row)
                 desc_w = max(desc_w, len(prev_row.description))
                 amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-                run_w = max(run_w, len(f"{prev_row.running:.2f}"))
+                run_w = max(run_w, len(f"{prev_row.running_account:.2f}"))
+                if multi:
+                    tot_w = max(tot_w, len(f"{prev_row.running_total:.2f}"))
                 index += 1
 
             while len(rows) < visible:
-                nxt = get_next(rows[-1].timestamp)
-                if nxt is None:
+                next_row = get_next(rows[-1].timestamp)
+                if next_row is None:
                     break
-                next_row = LedgerRow(
-                    nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                )
                 rows.append(next_row)
                 desc_w = max(desc_w, len(next_row.description))
                 amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-                run_w = max(run_w, len(f"{next_row.running:.2f}"))
+                run_w = max(run_w, len(f"{next_row.running_account:.2f}"))
+                if multi:
+                    tot_w = max(tot_w, len(f"{next_row.running_total:.2f}"))
 
             top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
 
             stdscr.erase()
+            if multi:
+                header = (
+                    f"{'Date'} | "
+                    f"{'Account':<{acct_w}} | "
+                    f"{'Description':<{desc_w}} | "
+                    f"{'Amount':>{amt_w}} | "
+                    f"{'Balance (Acct)':>{run_w}} | "
+                    f"{'Balance (Total)':>{tot_w}}"
+                )
+                try:
+                    stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
+                except curses.error:
+                    pass
+                row_y_start = 1
+            else:
+                row_y_start = 0
+
             for i in range(visible):
                 line_idx = top + i
                 if line_idx >= len(rows):
                     break
                 r = rows[line_idx]
-                line = (
-                    f"{r.date.strftime('%Y-%m-%d')} | "
-                    f"{r.description:<{desc_w}} | "
-                    f"{r.amount:>{amt_w}.2f} | {r.running:>{run_w}.2f}"
-                )
+                if multi:
+                    acct = account_names.get(r.account_id, str(r.account_id))
+                    line = (
+                        f"{r.date.strftime('%Y-%m-%d')} | "
+                        f"{acct:<{acct_w}} | "
+                        f"{r.description:<{desc_w}} | "
+                        f"{r.amount:>{amt_w}.2f} | "
+                        f"{r.running_account:>{run_w}.2f} | "
+                        f"{r.running_total:>{tot_w}.2f}"
+                    )
+                else:
+                    line = (
+                        f"{r.date.strftime('%Y-%m-%d')} | "
+                        f"{r.description:<{desc_w}} | "
+                        f"{r.amount:>{amt_w}.2f} | {r.running_account:>{run_w}.2f}"
+                    )
                 attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
                 try:
-                    stdscr.addnstr(i, 0, line, w - 1, attr)
+                    stdscr.addnstr(row_y_start + i, 0, line, w - 1, attr)
                 except curses.error:
                     pass
 
@@ -1048,28 +1607,26 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 if index > 0:
                     index -= 1
                 else:
-                    prev = get_prev(rows[0].timestamp)
-                    if prev is not None:
-                        prev_row = LedgerRow(
-                            prev[0], prev[1], prev[2], rows[0].running - rows[0].amount
-                        )
+                    prev_row = get_prev(rows[0].timestamp)
+                    if prev_row is not None:
                         rows.insert(0, prev_row)
                         desc_w = max(desc_w, len(prev_row.description))
                         amt_w = max(amt_w, len(f"{prev_row.amount:.2f}"))
-                        run_w = max(run_w, len(f"{prev_row.running:.2f}"))
+                        run_w = max(run_w, len(f"{prev_row.running_account:.2f}"))
+                        if multi:
+                            tot_w = max(tot_w, len(f"{prev_row.running_total:.2f}"))
             elif key == curses.KEY_DOWN:
                 if index < len(rows) - 1:
                     index += 1
                 else:
-                    nxt = get_next(rows[-1].timestamp)
-                    if nxt is not None:
-                        next_row = LedgerRow(
-                            nxt[0], nxt[1], nxt[2], rows[-1].running + nxt[2]
-                        )
+                    next_row = get_next(rows[-1].timestamp)
+                    if next_row is not None:
                         rows.append(next_row)
                         desc_w = max(desc_w, len(next_row.description))
                         amt_w = max(amt_w, len(f"{next_row.amount:.2f}"))
-                        run_w = max(run_w, len(f"{next_row.running:.2f}"))
+                        run_w = max(run_w, len(f"{next_row.running_account:.2f}"))
+                        if multi:
+                            tot_w = max(tot_w, len(f"{next_row.running_total:.2f}"))
                         index += 1
             elif key == curses.KEY_PPAGE:
                 index = max(0, index - visible)
@@ -1079,6 +1636,18 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                 index = 0
             elif key == curses.KEY_END:
                 index = len(rows) - 1
+            elif key == ord("a"):
+                add_transaction(stdscr)
+                current_ts = rows[index].timestamp
+                if hasattr(get_prev, "refresh"):
+                    new_row = get_prev.refresh(current_ts)
+                    rows = [new_row]
+                    index = 0
+                    desc_w = len(new_row.description)
+                    amt_w = len(f"{new_row.amount:.2f}")
+                    run_w = len(f"{new_row.running_account:.2f}")
+                    if multi:
+                        tot_w = len(f"{new_row.running_total:.2f}")
             elif key in (ord("t"), ord("T")):
                 if IRREG_MODE == "deterministic":
                     IRREG_MODE = "monte_carlo"
@@ -1095,7 +1664,9 @@ def ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt):
                     index = 0
                     desc_w = len(new_row.description)
                     amt_w = len(f"{new_row.amount:.2f}")
-                    run_w = len(f"{new_row.running:.2f}")
+                    run_w = len(f"{new_row.running_account:.2f}")
+                    if multi:
+                        tot_w = len(f"{new_row.running_total:.2f}")
                 mode_label = (
                     "Deterministic"
                     if IRREG_MODE == "deterministic"
@@ -1169,20 +1740,26 @@ def scroll_menu(
                         except curses.error:
                             pass
 
-                    top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+                    top = min(
+                        max(0, index - visible // 2), max(0, len(entries) - visible)
+                    )
                     for i in range(visible):
                         line_idx = top + i
                         if line_idx >= len(entries):
                             break
                         line = entries[line_idx]
-                        attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                        attr = (
+                            curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                        )
                         try:
                             win.addnstr(1 + offset + i, 2, line, content_width, attr)
                         except curses.error:
                             pass
 
                     try:
-                        win.addnstr(total_height - 2, 2, footer_l, max(0, content_width))
+                        win.addnstr(
+                            total_height - 2, 2, footer_l, max(0, content_width)
+                        )
                         win.addnstr(
                             total_height - 2,
                             2 + max(0, content_width - len(footer_r_text)),
@@ -1272,15 +1849,45 @@ def scroll_menu(
 def ledger_view(stdscr) -> None:
     """Display a scrollable ledger as ``date | name | amount | balance``."""
     session = SessionLocal()
-    bal = session.get(Balance, 1)
-    bal_amt = bal.amount if bal else 0.0
+    ensure_default_account(session)
+    account_ids = CURRENT_ACCOUNT_IDS
+    if account_ids is None:
+        accounts = (
+            session.query(Account)
+            .filter(Account.archived == False)
+            .order_by(Account.name)
+            .all()
+        )
+        account_ids = [a.id for a in accounts]
+    else:
+        accounts = session.query(Account).filter(Account.id.in_(account_ids)).all()
+    if not account_ids:
+        default_acc = ensure_default_account(session)
+        account_ids = [default_acc.id]
+        accounts = [default_acc]
+    bal_amt = 0.0
+    for aid in account_ids:
+        bal = (
+            session.query(Balance)
+            .filter(Balance.account_id == aid)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
+        if bal:
+            bal_amt += bal.amount
 
-    earliest_tx = session.query(Transaction).order_by(Transaction.timestamp).first()
+    earliest_tx = (
+        session.query(Transaction)
+        .filter(Transaction.account_id.in_(account_ids))
+        .order_by(Transaction.timestamp)
+        .first()
+    )
     earliest_date = earliest_tx.timestamp.date() if earliest_tx else date.today()
     plan_start = earliest_date
     plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
+    account_names = {a.id: a.name for a in accounts}
 
-    rows = list(ledger_rows(session, plan_start, plan_end))
+    rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
     if not rows:
         session.close()
         return
@@ -1294,7 +1901,7 @@ def ledger_view(stdscr) -> None:
 
     def rebuild():
         nonlocal rows, ts_list
-        rows = list(ledger_rows(session, plan_start, plan_end))
+        rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
         ts_list = [r.timestamp for r in rows]
 
     def refresh(ts_current: datetime):
@@ -1314,8 +1921,7 @@ def ledger_view(stdscr) -> None:
             rebuild()
         idx = bisect_left(ts_list, ts_before) - 1
         if idx >= 0:
-            r = rows[idx]
-            return r.timestamp, r.description, r.amount
+            return rows[idx]
         return None
 
     def get_next(ts_after):
@@ -1325,17 +1931,31 @@ def ledger_view(stdscr) -> None:
             rebuild()
         idx = bisect_right(ts_list, ts_after)
         if idx < len(rows):
-            r = rows[idx]
-            return r.timestamp, r.description, r.amount
+            return rows[idx]
         return None
 
     get_prev.refresh = refresh  # type: ignore[attr-defined]
-    ledger_curses(stdscr, initial_row, get_prev, get_next, bal_amt)
+    ledger_curses(
+        stdscr,
+        initial_row,
+        get_prev,
+        get_next,
+        bal_amt,
+        account_names,
+        len(account_ids) > 1,
+    )
     session.close()
 
 
 def irregular_category_form(
-    stdscr, name: str, window_days: int, alpha: float, safety_q: float, active: bool
+    stdscr,
+    session,
+    name: str,
+    window_days: int,
+    alpha: float,
+    safety_q: float,
+    active: bool,
+    account: Account | None = None,
 ):
     """Prompt for irregular category fields and return updated values."""
 
@@ -1354,6 +1974,15 @@ def irregular_category_form(
     active_str = text(stdscr, "Active (Y/N)", default="Y" if active else "N")
     if active_str is None:
         return None
+    if account is not None:
+        default_acct = account
+    elif CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
+        default_acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
+    else:
+        default_acct = None
+    acct = pick_account(stdscr, session, "Account", default=default_acct)
+    if acct is None:
+        return None
     try:
         window_days_val = int(win_str)
         alpha_val = float(alpha_str)
@@ -1361,7 +1990,14 @@ def irregular_category_form(
     except ValueError:
         return None
     active_val = active_str.strip().lower() in ("y", "yes", "true", "1")
-    return name_new, window_days_val, alpha_val, safety_val, active_val
+    return (
+        name_new,
+        window_days_val,
+        alpha_val,
+        safety_val,
+        active_val,
+        acct.id,
+    )
 
 
 def edit_irregular_category(
@@ -1369,17 +2005,22 @@ def edit_irregular_category(
 ) -> None:
     """Add or edit an irregular category."""
 
+    existing_acct = (
+        session.get(Account, existing.account_id) if existing else None
+    )
     form = irregular_category_form(
         stdscr,
+        session,
         existing.name if existing else "",
         existing.window_days if existing else 120,
         existing.alpha if existing else 0.3,
         existing.safety_quantile if existing else 0.8,
         existing.active if existing else True,
+        existing_acct,
     )
     if form is None:
         return
-    name, window_days, alpha, safety_q, active = form
+    name, window_days, alpha, safety_q, active, account_id = form
     if existing is None:
         cat = IrregularCategory(
             name=name,
@@ -1387,6 +2028,7 @@ def edit_irregular_category(
             alpha=alpha,
             safety_quantile=safety_q,
             active=active,
+            account_id=account_id,
         )
         session.add(cat)
     else:
@@ -1398,6 +2040,9 @@ def edit_irregular_category(
         cat.alpha = alpha
         cat.safety_quantile = safety_q
         cat.active = active
+        cat.account_id = account_id
+        for rule in cat.rules:
+            rule.account_id = account_id
     session.commit()
 
 
@@ -1419,7 +2064,9 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
-            header = f"Rules for {category.name}"
+            acct = session.get(Account, category.account_id)
+            acct_name = acct.name if acct else ""
+            header = f"Rules for {category.name} ({acct_name})"
             offset = 1
             visible = min(len(entries), h - 1 - offset)
             top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
@@ -1478,7 +2125,12 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
                 pattern = text(stdscr, "Pattern")
                 if pattern:
                     session.add(
-                        IrregularRule(category_id=category.id, pattern=pattern, active=True)
+                        IrregularRule(
+                            category_id=category.id,
+                            account_id=category.account_id,
+                            pattern=pattern,
+                            active=True,
+                        )
                     )
                     session.commit()
             elif key in (ord("d"), ord("D")) and rules:
@@ -1493,7 +2145,9 @@ def irregular_rules_menu(stdscr, category: IrregularCategory) -> None:
                 start = end - timedelta(days=90)
                 txns = (
                     session.query(Transaction)
-                    .filter(Transaction.timestamp >= start, Transaction.timestamp <= end)
+                    .filter(
+                        Transaction.timestamp >= start, Transaction.timestamp <= end
+                    )
                     .order_by(Transaction.timestamp.desc())
                     .all()
                 )
@@ -1540,8 +2194,19 @@ def irregular_menu(stdscr) -> None:
         while True:
             cats = categories(session)
             name_w = max((len(c.name) for c in cats), default=0)
+            acct_map = {
+                a.id: a.name
+                for a in session.query(Account)
+                .filter(Account.id.in_([c.account_id for c in cats]))
+                .all()
+            }
+            acct_w = max((len(acct_map.get(c.account_id, "")) for c in cats), default=0)
             entries = [
-                f"{c.name:<{name_w}} | {c.window_days:>3} | {c.alpha:.2f} | {c.safety_quantile:.2f} | {'Y' if c.active else 'N'}"
+                (
+                    f"{c.name:<{name_w}} | {acct_map.get(c.account_id, ''):<{acct_w}} | "
+                    f"{c.window_days:>3} | {c.alpha:.2f} | {c.safety_quantile:.2f} | "
+                    f"{'Y' if c.active else 'N'}"
+                )
                 for c in cats
             ]
 
@@ -1628,7 +2293,9 @@ def irregular_menu(stdscr) -> None:
                     if days > 0:
                         end = date.today()
                         start = end - timedelta(days=days)
-                        state = learn_irregular_state(session, cats[index].id, start, end)
+                        state = learn_irregular_state(
+                            session, cats[index].id, start, end
+                        )
                         avg = state.avg_gap_days or 0.0
                         med = state.median_amount or 0.0
                         toast(stdscr, f"{avg:.1f}d gap, {med:.2f} amt")
@@ -1805,15 +2472,25 @@ def main(stdscr) -> None:
         except curses.error:  # pragma: no cover - terminals without color
             pass
         init_db()
+        session = SessionLocal()
+        try:
+            try:
+                ensure_default_account(session)
+            except OperationalError:
+                pass
+        finally:
+            session.close()
         while True:
             choice = select(
                 stdscr,
                 "Select an option",
                 choices=[
                     "List transactions",
+                    "Max Safe Payment (today)",
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
+                    "Accounts...",
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
@@ -1824,12 +2501,16 @@ def main(stdscr) -> None:
             )
             if choice == "List transactions":
                 list_transactions(stdscr)
+            elif choice == "Max Safe Payment (today)":
+                max_payment_today_menu(stdscr)
             elif choice == "Edit bills":
                 edit_recurring(stdscr, False)
             elif choice == "Edit income":
                 edit_recurring(stdscr, True)
             elif choice == "Irregular spending":
                 irregular_menu(stdscr)
+            elif choice == "Accounts...":
+                accounts_menu(stdscr)
             elif choice == "Ledger":
                 ledger_view(stdscr)
             elif choice == "Set balance":

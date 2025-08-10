@@ -8,6 +8,7 @@ from budget.models import (
     IrregularCategory,
     IrregularRule,
     IrregularState,
+    Account,
 )
 
 
@@ -31,13 +32,23 @@ def test_transaction_persistence():
 
 def test_add_transaction_with_date(monkeypatch):
     Session, path = get_temp_session()
+    session = None
     try:
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(
-            cli, "select", make_prompt(["description", "date", "amount", "save"])
+            cli,
+            "pick_account",
+            lambda stdscr, session, prompt="From account", default=None: session.get(Account, 1),
         )
         monkeypatch.setattr(
-            cli, "text", make_prompt(["Groceries", "2023-02-01", "20.5"])
+            cli,
+            "transaction_form",
+            lambda stdscr, sess, from_acct, d, t, a, to=None: (
+                "Groceries",
+                datetime(2023, 2, 1),
+                20.5,
+                None,
+            ),
         )
 
         cli.add_transaction(object())
@@ -50,7 +61,8 @@ def test_add_transaction_with_date(monkeypatch):
         assert txn.amount == 20.5
         assert txn.timestamp.date() == datetime(2023, 2, 1).date()
     finally:
-        session.close()
+        if session is not None:
+            session.close()
         path.unlink()
 
 
@@ -58,18 +70,14 @@ def test_edit_transaction(monkeypatch):
     Session, path = get_temp_session()
     try:
         session = Session()
-        txn = Transaction(
-            description="Old", amount=5.0, timestamp=datetime(2023, 1, 1)
-        )
+        txn = Transaction(description="Old", amount=5.0, timestamp=datetime(2023, 1, 1))
         session.add(txn)
         session.commit()
 
         monkeypatch.setattr(
-            cli, "select", make_prompt(["description", "amount", "date", "save"])
+            cli, "select", make_prompt(["name", "amount", "date", "save"])
         )
-        monkeypatch.setattr(
-            cli, "text", make_prompt(["New", "10.0", "2023-03-03"])
-        )
+        monkeypatch.setattr(cli, "text", make_prompt(["New", "10.0", "2023-03-03"]))
 
         cli.edit_transaction(object(), session, txn)
         session.refresh(txn)
@@ -86,9 +94,15 @@ def test_set_balance(monkeypatch):
     try:
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(cli, "text", make_prompt(["100.0"]))
+        monkeypatch.setattr(cli, "CURRENT_ACCOUNT_IDS", [1], raising=False)
         cli.set_balance(object())
         session = Session()
-        bal = session.get(Balance, 1)
+        bal = (
+            session.query(Balance)
+            .filter(Balance.account_id == 1)
+            .order_by(Balance.timestamp.desc())
+            .first()
+        )
         assert bal is not None
         assert bal.amount == 100.0
     finally:
@@ -102,8 +116,12 @@ def test_list_transactions_columns(monkeypatch):
         session = Session()
         session.add_all(
             [
-                Transaction(description="Short", amount=5.0, timestamp=datetime(2023, 1, 1)),
-                Transaction(description="Longer", amount=-3.0, timestamp=datetime(2023, 1, 2)),
+                Transaction(
+                    description="Short", amount=5.0, timestamp=datetime(2023, 1, 1)
+                ),
+                Transaction(
+                    description="Longer", amount=-3.0, timestamp=datetime(2023, 1, 2)
+                ),
             ]
         )
         session.commit()
@@ -208,7 +226,11 @@ def test_add_transaction_updates_irregular_state(monkeypatch):
         session.add(cat)
         session.commit()
         cat_id = cat.id
-        session.add(IrregularRule(category_id=cat_id, pattern="grocer"))
+        session.add(
+            IrregularRule(
+                category_id=cat_id, account_id=cat.account_id, pattern="grocer"
+            )
+        )
         session.commit()
         session.close()
 
@@ -216,8 +238,18 @@ def test_add_transaction_updates_irregular_state(monkeypatch):
         monkeypatch.setattr(cli, "SessionLocal", Session)
         monkeypatch.setattr(
             cli,
+            "pick_account",
+            lambda stdscr, session, prompt="From account", default=None: session.get(Account, 1),
+        )
+        monkeypatch.setattr(
+            cli,
             "transaction_form",
-            lambda stdscr, d, t, a: ("Local Grocer", datetime(2023, 4, 2), -20.0),
+            lambda stdscr, sess, from_acct, d, t, a, to=None: (
+                "Local Grocer",
+                datetime(2023, 4, 2),
+                -20.0,
+                None,
+            ),
         )
         captured = {}
 
