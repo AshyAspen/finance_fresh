@@ -533,12 +533,12 @@ def materialize_recurring_in_window(
             from_id = int(r.account_id)
             to_id = getattr(r, "to_account_id", None)
 
-            out_amt = -abs(amt)
-            if _overlaps_posted(idx, from_id, occ_d, out_amt, desc):
+            if _overlaps_posted(idx, from_id, occ_d, -abs(amt), desc):
                 continue
 
             ts = datetime.combine(occ_d, time.min)
             gid = str(uuid.uuid4()) if to_id else None
+            out_amt = -abs(amt)
 
             t_out = Transaction(
                 account_id=from_id,

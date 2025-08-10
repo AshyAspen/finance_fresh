@@ -1839,6 +1839,23 @@ def ledger_rows(
     for t in irr_series:
         setattr(t, "_source_type", "irregular")
 
+    def _synthetic_overlaps_posted(t: Transaction) -> bool:
+        return _overlaps_posted(
+            posted_idx,
+            t.account_id,
+            t.timestamp.date(),
+            t.amount or 0.0,
+            t.description or "",
+        )
+
+    filtered: list[Transaction] = []
+    for t in txns:
+        src = getattr(t, "_source_type", "posted")
+        if src != "posted" and _synthetic_overlaps_posted(t):
+            continue
+        filtered.append(t)
+    txns = filtered
+
     def classify_priority(t):
         src = getattr(t, "_source_type", "posted")
         amt = t.amount or 0.0
@@ -1873,15 +1890,6 @@ def ledger_rows(
         assert isinstance(t.account_id if t.account_id is not None else -1, int)
 
     txns.sort(key=_ledger_sort_key)
-
-    def _synthetic_overlaps_posted(t: Transaction) -> bool:
-        return _overlaps_posted(
-            posted_idx,
-            t.account_id,
-            t.timestamp.date(),
-            t.amount or 0.0,
-            t.description or "",
-        )
 
     offset: dict[int, float] = {}
     for aid in account_ids:
