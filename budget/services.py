@@ -1,11 +1,19 @@
 from __future__ import annotations
-from datetime import date, datetime, timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta, time
 import calendar
 import uuid
 from typing import Iterable, Iterator
 
-from .models import Account, Balance, Recurring, Transaction
+from .models import (
+    Account,
+    Balance,
+    Recurring,
+    Transaction,
+    ReconcileCheckpoint,
+)
 from .services_irregular import irregular_daily_series
+from sqlalchemy import func
 
 
 def add_months(d: date, months: int) -> date:
@@ -265,7 +273,7 @@ def simulate_balances(
         row = (
             session.query(Balance)
             .filter(Balance.account_id == aid)
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         amt = row.amount if row else 0.0
@@ -399,3 +407,178 @@ def max_safe_payment_today(
         else:
             hi = mid
     return round((lo + hi) / 2, 2)
+
+
+def _norm_desc(s: str) -> str:
+    s = (s or "").strip().lower()
+    return " ".join("".join(ch for ch in s if ch.isalnum() or ch.isspace()).split())
+
+
+def get_first_balance(session, account_id: int):
+    return (
+        session.query(Balance)
+        .filter(Balance.account_id == account_id)
+        .order_by(Balance.timestamp.asc())
+        .first()
+    )
+
+
+def get_last_checkpoint(session, account_id: int):
+    return (
+        session.query(ReconcileCheckpoint)
+        .filter(ReconcileCheckpoint.account_id == account_id)
+        .order_by(ReconcileCheckpoint.as_of_date.desc())
+        .first()
+    )
+
+
+def set_checkpoint(session, account_id: int, as_of: date):
+    rc = ReconcileCheckpoint(account_id=account_id, as_of_date=as_of)
+    session.add(rc)
+    session.commit()
+    return rc
+
+
+def earliest_posted_tx_date(session, account_id: int) -> date | None:
+    t = (
+        session.query(Transaction)
+        .filter(Transaction.account_id == account_id)
+        .order_by(Transaction.timestamp.asc())
+        .first()
+    )
+    return t.timestamp.date() if t else None
+
+
+def upsert_balance_for_date(session, account_id: int, as_of: date, amount: float):
+    ts = datetime.combine(as_of, time.min)
+    ts_next = ts + timedelta(days=1)
+    existing = (
+        session.query(Balance)
+        .filter(
+            Balance.account_id == account_id,
+            Balance.timestamp >= ts,
+            Balance.timestamp < ts_next,
+        )
+        .order_by(Balance.id.desc())
+        .first()
+    )
+    if existing:
+        existing.amount = amount
+        existing.timestamp = ts
+    else:
+        session.add(Balance(account_id=account_id, amount=amount, timestamp=ts))
+    session.commit()
+
+
+def _posted_index_for_window(
+    session, account_ids, start_d: date, end_d: date
+):
+    idx = defaultdict(set)
+    qs = session.query(Transaction).filter(
+        Transaction.timestamp >= datetime.combine(start_d, time.min),
+        Transaction.timestamp <= datetime.combine(end_d, time.max),
+    )
+    if account_ids:
+        qs = qs.filter(Transaction.account_id.in_(account_ids))
+    for t in qs:
+        k = (t.account_id, t.timestamp.date())
+        sign = 1 if (t.amount or 0.0) >= 0 else -1
+        amt = round(abs(t.amount or 0.0), 2)
+        idx[k].add((sign, amt, _norm_desc(t.description or "")))
+    return idx
+
+
+def _overlaps_posted(idx, aid: int, day: date, amount: float, desc: str) -> bool:
+    k = (aid, day)
+    if k not in idx:
+        return False
+    sign = 1 if (amount or 0.0) >= 0 else -1
+    amt = round(abs(amount or 0.0), 2)
+    nd = _norm_desc(desc)
+    if (sign, amt, nd) in idx[k]:
+        return True
+    for psign, pamt, _ in idx[k]:
+        if psign == sign and abs(pamt - amt) <= 1.00:
+            return True
+    return False
+
+
+def expand_recurring_occurrences(
+    recurring: Recurring, start_d: date, end_d: date
+) -> list[date]:
+    """Return all occurrence dates between start_d and end_d inclusive."""
+    anchor = (
+        recurring.start_date.date()
+        if isinstance(recurring.start_date, datetime)
+        else recurring.start_date
+    )
+    return occurrences_between(anchor, recurring.frequency, start_d, end_d)
+
+
+def materialize_recurring_in_window(
+    session, start_d: date, end_d: date, account_ids: list[int] | None
+):
+    idx = _posted_index_for_window(session, account_ids, start_d, end_d)
+
+    rq = session.query(Recurring)
+    if account_ids:
+        rq = rq.filter(Recurring.account_id.in_(account_ids))
+
+    inserted = 0
+    for r in rq:
+        occs = expand_recurring_occurrences(r, start_d, end_d)
+        for occ_d in occs:
+            amt = float(r.amount or 0.0)
+            desc = r.description or "Recurring"
+            from_id = int(r.account_id)
+            to_id = getattr(r, "to_account_id", None)
+
+            if _overlaps_posted(idx, from_id, occ_d, -abs(amt), desc):
+                continue
+
+            ts = datetime.combine(occ_d, time.min)
+            gid = str(uuid.uuid4()) if to_id else None
+            out_amt = -abs(amt)
+
+            t_out = Transaction(
+                account_id=from_id,
+                timestamp=ts,
+                amount=out_amt,
+                description=desc,
+                transfer_id=gid,
+                origin_type="recurring",
+                origin_id=r.id,
+                origin_occurrence_date=occ_d,
+            )
+            session.add(t_out)
+            inserted += 1
+            idx[(from_id, occ_d)].add(
+                (-1, round(abs(out_amt), 2), _norm_desc(desc))
+            )
+
+            if to_id:
+                in_desc = (
+                    f"{desc} (from {r.account.name})"
+                    if hasattr(r, "account")
+                    else desc
+                )
+                in_amt = abs(amt)
+                if not _overlaps_posted(idx, to_id, occ_d, in_amt, in_desc):
+                    t_in = Transaction(
+                        account_id=to_id,
+                        timestamp=ts,
+                        amount=in_amt,
+                        description=in_desc,
+                        transfer_id=gid,
+                        origin_type="recurring",
+                        origin_id=r.id,
+                        origin_occurrence_date=occ_d,
+                    )
+                    session.add(t_in)
+                    inserted += 1
+                    idx[(to_id, occ_d)].add(
+                        (+1, round(abs(in_amt), 2), _norm_desc(in_desc))
+                    )
+
+    session.commit()
+    return inserted

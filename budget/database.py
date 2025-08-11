@@ -50,6 +50,7 @@ def init_db() -> None:
         "irregular_categories",
         "irregular_state",
         "irregular_rules",
+        "reconcile_checkpoints",
     }
     existing = set(insp.get_table_names())
     if not required.issubset(existing):
@@ -104,6 +105,23 @@ def init_db() -> None:
                     "CREATE INDEX IF NOT EXISTS ix_transactions_transfer_id ON transactions(transfer_id)"
                 )
             )
+        if "origin_type" not in cols:
+            conn.execute(text("ALTER TABLE transactions ADD COLUMN origin_type TEXT"))
+        if "origin_id" not in cols:
+            conn.execute(text("ALTER TABLE transactions ADD COLUMN origin_id INTEGER"))
+        if "origin_occurrence_date" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE transactions ADD COLUMN origin_occurrence_date DATE"
+                )
+            )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tx_origin_lookup ON transactions("
+                "account_id, origin_type, origin_id, origin_occurrence_date)"
+            )
+        )
+
         cols = [r[1] for r in conn.execute(text("PRAGMA table_info(recurring)"))]
         if "transfer_id" not in cols:
             conn.execute(text("ALTER TABLE recurring ADD COLUMN transfer_id TEXT"))
@@ -112,6 +130,27 @@ def init_db() -> None:
                     "CREATE INDEX IF NOT EXISTS ix_recurring_transfer_id ON recurring(transfer_id)"
                 )
             )
+        if "to_account_id" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE recurring ADD COLUMN to_account_id INTEGER REFERENCES accounts(id)"
+                )
+            )
+
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS reconcile_checkpoints ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "account_id INTEGER NOT NULL REFERENCES accounts(id), "
+                "as_of_date DATE NOT NULL)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_reconcile_unique "
+                "ON reconcile_checkpoints(account_id, as_of_date)"
+            )
+        )
         # If a legacy balance row exists, duplicate it for the default account
         res = conn.execute(
             text("SELECT COUNT(*) FROM balance WHERE account_id = :acc"),

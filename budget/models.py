@@ -5,6 +5,7 @@ from sqlalchemy import (
     String,
     Float,
     DateTime,
+    Date,
     Boolean,
     ForeignKey,
     Text,
@@ -47,6 +48,20 @@ class Transaction(Base):
         default=1,
     )
     transfer_id = Column(String, nullable=True, index=True)
+    # provenance of the transaction, e.g. "recurring" or "reconcile"
+    origin_type = Column(String, nullable=True)
+    origin_id = Column(Integer, nullable=True)
+    origin_occurrence_date = Column(Date, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_tx_origin_lookup",
+            "account_id",
+            "origin_type",
+            "origin_id",
+            "origin_occurrence_date",
+        ),
+    )
 
 
 class Balance(Base):
@@ -70,6 +85,20 @@ class Balance(Base):
     )
 
 
+class ReconcileCheckpoint(Base):
+    """Per-account reconciliation checkpoint."""
+
+    __tablename__ = "reconcile_checkpoints"
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), index=True, nullable=False)
+    as_of_date = Column(Date, nullable=False)
+
+    __table_args__ = (
+        Index("ix_reconcile_unique", "account_id", "as_of_date"),
+    )
+
+
 class Recurring(Base):
     """A recurring bill or income entry."""
 
@@ -87,6 +116,7 @@ class Recurring(Base):
         nullable=False,
         default=1,
     )
+    to_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     transfer_id = Column(String, nullable=True, index=True)
 
 

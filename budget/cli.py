@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 import curses
 import calendar
 from dataclasses import dataclass
@@ -10,8 +10,10 @@ from bisect import bisect_left, bisect_right
 from curses import panel
 from contextlib import contextmanager
 from collections import defaultdict
+from typing import Callable
 
 from .database import SessionLocal, init_db, ensure_default_account
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from .models import (
     Transaction,
@@ -41,6 +43,14 @@ from .services import (
     create_recurring_transfer,
     update_recurring_transfer,
     delete_recurring_transfer,
+    earliest_posted_tx_date,
+    get_first_balance,
+    get_last_checkpoint,
+    set_checkpoint,
+    upsert_balance_for_date,
+    materialize_recurring_in_window,
+    _posted_index_for_window,
+    _overlaps_posted,
 )
 
 FREQUENCIES = [
@@ -62,6 +72,7 @@ EXTEND_CHUNK_MONTHS = 6
 EDGE_TRIGGER_DAYS = 14
 
 CURRENT_ACCOUNT_IDS: list[int] | None = None  # None means "All Accounts"
+CURRENT_LEDGER_REFRESH: Callable[[datetime], None] | None = None
 
 
 def select(stdscr, message, choices, default=None, boxed=True):
@@ -101,29 +112,13 @@ def select(stdscr, message, choices, default=None, boxed=True):
         if accts:
             if len(accts) == 1:
                 acct = accts[0]
-                bal_row = (
-                    s.query(Balance)
-                    .filter(Balance.account_id == acct.id)
-                    .order_by(Balance.timestamp.desc())
-                    .first()
-                )
-                amt = bal_row.amount if bal_row else 0.0
-                ts = (
-                    bal_row.timestamp.strftime("%Y-%m-%d")
-                    if bal_row and bal_row.timestamp
-                    else "n/a"
-                )
-                footer_right = f"{acct.name}: {amt:.2f} @ {ts}"
+                as_of = date.today()
+                amt = display_balance_as_of(s, acct.id, as_of)
+                footer_right = f"{acct.name}: {amt:.2f} @ {as_of:%Y-%m-%d}"
             else:
                 parts: list[str] = []
                 for acct in accts:
-                    bal_row = (
-                        s.query(Balance)
-                        .filter(Balance.account_id == acct.id)
-                        .order_by(Balance.timestamp.desc())
-                        .first()
-                    )
-                    amt = bal_row.amount if bal_row else 0.0
+                    amt = display_balance_as_of(s, acct.id, date.today())
                     parts.append(f"{acct.name}:{amt:.2f}")
                 footer_right = "; ".join(parts)
 
@@ -140,13 +135,26 @@ def select(stdscr, message, choices, default=None, boxed=True):
     return values[selected]
 
 
-def list_accounts(session):
+def list_accounts(session, include_archived: bool = False):
+    query = session.query(Account)
+    if not include_archived:
+        query = query.filter(Account.archived == False)
+    return query.order_by(Account.name).all()
+
+
+def account_has_activity(session, account_id: int) -> bool:
     return (
-        session.query(Account)
-        .filter(Account.archived == False)
-        .order_by(Account.name)
-        .all()
+        session.query(Transaction).filter_by(account_id=account_id).first() is not None
+        or session.query(Recurring).filter_by(account_id=account_id).first() is not None
+        or session.query(Balance).filter_by(account_id=account_id).first() is not None
     )
+
+
+def format_account_row(account: Account) -> str:
+    row = f"{account.name}  \u2022  {account.type}  \u2022  {account.currency}"
+    if getattr(account, "archived", False):
+        row += " (archived)"
+    return row
 
 
 def pick_account(stdscr, session, prompt="Select account", default=None):
@@ -155,6 +163,57 @@ def pick_account(stdscr, session, prompt="Select account", default=None):
         return None
     choice = select(stdscr, prompt, [(a.name, a) for a in accts], default=default)
     return choice
+
+
+def account_form(
+    stdscr,
+    name: str,
+    acc_type: str,
+    currency: str,
+    allow_archive: bool = False,
+    archived: bool = False,
+):
+    default = "name"
+    while True:
+        choices = [
+            (f"Name: {name}", "name"),
+            (f"Type: {acc_type}", "type"),
+            (f"Currency: {currency}", "currency"),
+        ]
+        if allow_archive:
+            choices.append((f"Archived: {'yes' if archived else 'no'}", "archived"))
+        choices.extend([("Save", "save"), ("Cancel", "cancel")])
+        choice = select(
+            stdscr,
+            "Select field to edit",
+            choices,
+            default=default,
+        )
+        if choice == "name":
+            new_name = text(stdscr, "Name", default=name)
+            if new_name is not None:
+                name = new_name
+            default = "type"
+        elif choice == "type":
+            picked = select(
+                stdscr,
+                "Type",
+                ["checking", "savings", "credit_card", "loan", "cash"],
+                default=acc_type,
+            )
+            if picked is not None:
+                acc_type = picked
+        elif choice == "currency":
+            cur = text(stdscr, "Currency", default=currency)
+            if cur is not None:
+                currency = cur.upper()
+            default = "save"
+        elif choice == "archived":
+            archived = not archived
+        elif choice == "save":
+            return name, acc_type, currency, archived
+        else:
+            return None
 
 
 def _center_box(stdscr, height: int, width: int) -> "curses.window":
@@ -306,6 +365,17 @@ def confirm(stdscr, message: str) -> bool:
                 show_key_help(stdscr, ["Enter: confirm", "any other key: cancel"])
                 continue
             return ch in (curses.KEY_ENTER, 10, 13)
+
+
+def info(stdscr, msg: str) -> None:
+    h, w = stdscr.getmaxyx()
+    box_w = min(max(len(msg) + 4, 12), max(12, w - 2))
+    with modal_box(stdscr, 3, box_w) as win:
+        try:
+            win.addnstr(1, 2, msg[: box_w - 4], box_w - 4)
+        except curses.error:
+            pass
+        win.getch()
 
 
 def toast(stdscr, msg: str, ms: int = 900):
@@ -539,6 +609,156 @@ def accounts_menu(stdscr) -> None:
                     CURRENT_ACCOUNT_IDS = [acct.id]
             else:
                 break
+    finally:
+        session.close()
+
+
+def accounts_page(stdscr):
+    """Shows a scrollable list of accounts."""
+
+    session = SessionLocal()
+    index = 0
+    try:
+        with temp_cursor(0), keypad_mode(stdscr):
+            while True:
+                accounts = list_accounts(session, include_archived=True)
+                entries: list[str] = []
+                for acct in accounts:
+                    row = format_account_row(acct)
+                    as_of = date.today()
+                    amt = display_balance_as_of(session, acct.id, as_of)
+                    row += f"  \u2022  ${amt:,.2f} (as of {as_of:%Y-%m-%d})"
+                    entries.append(row)
+
+                h, w = stdscr.getmaxyx()
+                header = "Accounts"
+                offset = 1
+                visible = min(len(entries), h - 2)
+                top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+
+                stdscr.erase()
+                head_x = max(0, (w - len(header)) // 2)
+                try:
+                    stdscr.addnstr(0, head_x, header, max(0, w - head_x))
+                except curses.error:
+                    pass
+
+                if entries:
+                    for i in range(visible):
+                        line_idx = top + i
+                        if line_idx >= len(entries):
+                            break
+                        line = entries[line_idx]
+                        attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                        try:
+                            stdscr.addnstr(i + offset, 0, line, w - 1, attr)
+                        except curses.error:
+                            pass
+                else:
+                    hint = "No accounts. Press 'a' to add one."
+                    x = max(0, (w - len(hint)) // 2)
+                    try:
+                        stdscr.addnstr(1, x, hint, w - x)
+                    except curses.error:
+                        pass
+
+                footer = "a Add  e Edit  d Delete  Enter Open  q Back"
+                try:
+                    stdscr.addnstr(h - 1, 0, footer, w - 1)
+                except curses.error:
+                    pass
+                stdscr.refresh()
+
+                key = stdscr.getch()
+                if key == curses.KEY_RESIZE:
+                    curses.update_lines_cols()
+                    curses.resize_term(0, 0)
+                    stdscr.clearok(True)
+                    continue
+                if key == curses.KEY_UP and index > 0:
+                    index -= 1
+                elif key == curses.KEY_DOWN and index < len(entries) - 1:
+                    index += 1
+                elif key == curses.KEY_PPAGE:
+                    index = max(0, index - visible)
+                elif key == curses.KEY_NPAGE:
+                    index = min(len(entries) - 1, index + visible)
+                elif key == curses.KEY_HOME:
+                    index = 0
+                elif key == curses.KEY_END:
+                    index = len(entries) - 1
+                elif key in (ord("a"), ord("A")):
+                    form = account_form(stdscr, "", "checking", "USD")
+                    if form is not None:
+                        name, acc_type, currency, _ = form
+                        session.add(Account(name=name, type=acc_type, currency=currency))
+                        session.commit()
+                        index = len(entries)
+                elif key in (ord("e"), ord("E")) and accounts:
+                    acct = accounts[index]
+                    form = account_form(
+                        stdscr,
+                        acct.name,
+                        acct.type,
+                        acct.currency,
+                        allow_archive=True,
+                        archived=acct.archived,
+                    )
+                    if form is not None:
+                        name, acc_type, currency, archived = form
+                        acct = session.get(Account, acct.id)
+                        if acct:
+                            acct.name = name
+                            acct.type = acc_type
+                            acct.currency = currency
+                            acct.archived = archived
+                            session.commit()
+                elif key in (ord("d"), ord("D")) and accounts:
+                    acct = accounts[index]
+                    if account_has_activity(session, acct.id):
+                        resp = text(
+                            stdscr,
+                            "This account has activity. Delete anyway? Type the account name to confirm:",
+                        )
+                        if resp == acct.name:
+                            session.query(Transaction).filter(
+                                Transaction.account_id == acct.id
+                            ).delete(synchronize_session=False)
+                            session.query(Recurring).filter(
+                                Recurring.account_id == acct.id
+                            ).delete(synchronize_session=False)
+                            session.query(Balance).filter(
+                                Balance.account_id == acct.id
+                            ).delete(synchronize_session=False)
+                            session.delete(acct)
+                            session.commit()
+                            index = max(0, index - 1)
+                        elif resp is not None and confirm(stdscr, "Archive instead?"):
+                            acct.archived = True
+                            session.commit()
+                    else:
+                        if confirm(stdscr, "Delete this account?"):
+                            session.delete(acct)
+                            session.commit()
+                            index = max(0, index - 1)
+                elif key in (curses.KEY_ENTER, 10, 13) and accounts:
+                    open_account_ledger(stdscr, accounts[index].id)
+                elif key == ord("k"):
+                    show_key_help(
+                        stdscr,
+                        [
+                            "Up/Down: move selection",
+                            "PgUp/PgDn: page",
+                            "Home/End: jump to start/end",
+                            "a: add",
+                            "e: edit",
+                            "d: delete",
+                            "Enter: open",
+                            "q: back",
+                        ],
+                    )
+                elif key in (ord("q"), ord("Q"), 27):
+                    break
     finally:
         session.close()
 
@@ -982,6 +1202,160 @@ def _show_balances(stdscr, lines: list[str]) -> None:
         win.getch()
 
 
+def last_reconcile_date(session, account_id: int) -> date:
+    cp = get_last_checkpoint(session, account_id)
+    if cp:
+        return cp.as_of_date
+    fb = get_first_balance(session, account_id)
+    if fb:
+        return fb.timestamp.date()
+    e = earliest_posted_tx_date(session, account_id)
+    return e or date.today()
+
+
+def projected_balance_on(session, account_id: int, as_of: date) -> float:
+    start_d = last_reconcile_date(session, account_id)
+    rows = [
+        r
+        for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
+        if r.timestamp.date() <= as_of
+    ]
+    return rows[-1].running_account if rows else 0.0
+
+
+def display_balance_as_of(session, account_id: int, as_of: date) -> float:
+    """Return running balance for account at ``as_of`` using ledger rules."""
+    rows = [r for r in ledger_rows(session, as_of, as_of, account_ids=[account_id])]
+    if not rows:
+        fb = get_first_balance(session, account_id)
+        start_d = fb.timestamp.date() if fb else (
+            earliest_posted_tx_date(session, account_id) or as_of
+        )
+        rows = [
+            r
+            for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
+            if r.timestamp.date() <= as_of
+        ]
+    return rows[-1].running_account if rows else 0.0
+
+
+def list_transactions_since_checkpoint(
+    session, account_id: int, start_d: date, end_d: date
+):
+    return (
+        session.query(Transaction)
+        .filter(Transaction.account_id == account_id)
+        .filter(Transaction.timestamp >= datetime.combine(start_d, time.min))
+        .filter(Transaction.timestamp <= datetime.combine(end_d, time.max))
+        .order_by(Transaction.timestamp.asc())
+        .all()
+    )
+
+
+def reconcile_screen(
+    stdscr,
+    session,
+    account_id: int,
+    start_d: date,
+    end_d: date,
+    entered_amount: float,
+) -> bool:
+    acct = session.get(Account, account_id)
+    index = 0
+    while True:
+        txns = list_transactions_since_checkpoint(session, account_id, start_d, end_d)
+        proj = projected_balance_on(session, account_id, end_d)
+        diff = entered_amount - proj
+        entries = [
+            f"{t.timestamp.strftime('%Y-%m-%d')} {t.description} {t.amount:+.2f}"
+            for t in txns
+        ]
+        if not entries:
+            entries = ["(none)"]
+
+        header = f"{acct.name} [{start_d}..{end_d}] entered {entered_amount:.2f}"
+        footer_left = "a Add  e Edit  r Recalc  c Confirm  q Cancel"
+        footer_right = f"Proj {proj:.2f} Diff {diff:+.2f}"
+
+        with temp_cursor(0), keypad_mode(stdscr):
+            h, w = stdscr.getmaxyx()
+            visible = max(1, h - 2)
+            top = 0
+            while True:
+                stdscr.erase()
+                try:
+                    stdscr.addnstr(0, 0, header, w - 1)
+                except curses.error:
+                    pass
+                top = min(max(0, index - visible // 2), max(0, len(entries) - visible))
+                for i in range(min(len(entries), visible)):
+                    line_idx = top + i
+                    line = entries[line_idx]
+                    attr = curses.A_REVERSE if line_idx == index else curses.A_NORMAL
+                    try:
+                        stdscr.addnstr(1 + i, 0, line, w - 1, attr)
+                    except curses.error:
+                        pass
+                try:
+                    stdscr.addnstr(h - 1, 0, footer_left, w - 1)
+                    stdscr.addnstr(
+                        h - 1,
+                        max(0, w - len(footer_right)),
+                        footer_right,
+                        len(footer_right),
+                    )
+                except curses.error:
+                    pass
+                stdscr.refresh()
+                ch = stdscr.getch()
+                if ch == curses.KEY_UP and index > 0:
+                    index -= 1
+                elif ch == curses.KEY_DOWN and index < len(entries) - 1:
+                    index += 1
+                elif ch == curses.KEY_PPAGE:
+                    index = max(0, index - visible)
+                elif ch == curses.KEY_NPAGE:
+                    index = min(len(entries) - 1, index + visible)
+                elif ch in (curses.KEY_ENTER, 10, 13, ord("e")):
+                    if txns and index < len(txns):
+                        edit_transaction(stdscr, session, txns[index])
+                        session.commit()
+                    break
+                elif ch == ord("a"):
+                    from_acct = acct
+                    form = transaction_form(
+                        stdscr,
+                        session,
+                        from_acct,
+                        "",
+                        datetime.combine(end_d, time.min),
+                        0.0,
+                        None,
+                    )
+                    if form is not None:
+                        desc, ts, amt, to_acct = form
+                        if to_acct is None:
+                            create_transaction(session, from_acct.id, desc, amt, ts)
+                        else:
+                            create_transfer(
+                                session,
+                                from_acct.id,
+                                to_acct.id,
+                                amt,
+                                ts,
+                                desc,
+                            )
+                        session.commit()
+                    break
+                elif ch == ord("r"):
+                    break
+                elif ch == ord("c"):
+                    return True
+                elif ch == ord("q"):
+                    return False
+        # loop back to refresh after add/edit/recalc
+
+
 def set_balance(stdscr) -> None:
     """Prompt the user to store their current balance."""
     session = SessionLocal()
@@ -990,7 +1364,6 @@ def set_balance(stdscr) -> None:
         if CURRENT_ACCOUNT_IDS and len(CURRENT_ACCOUNT_IDS) == 1:
             acct = session.get(Account, CURRENT_ACCOUNT_IDS[0])
         else:
-            # Show existing balances for context
             scope_ids = (
                 CURRENT_ACCOUNT_IDS
                 if CURRENT_ACCOUNT_IDS is not None
@@ -1002,7 +1375,7 @@ def set_balance(stdscr) -> None:
                 bal_row = (
                     session.query(Balance)
                     .filter(Balance.account_id == aid)
-                    .order_by(Balance.timestamp.desc())
+                    .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
                     .first()
                 )
                 amt = bal_row.amount if bal_row else 0.0
@@ -1020,30 +1393,88 @@ def set_balance(stdscr) -> None:
         bal_row = (
             session.query(Balance)
             .filter(Balance.account_id == acct.id)
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         default_amt = f"{bal_row.amount:.2f}" if bal_row else None
-        ts_str = (
-            bal_row.timestamp.strftime("%Y-%m-%d")
-            if bal_row and bal_row.timestamp
-            else "n/a"
-        )
-        amount_str = text(
-            stdscr,
-            f"Balance for {acct.name} (last {ts_str})",
-            default=default_amt,
-        )
+        amount_str = text(stdscr, f"Balance for {acct.name}", default=default_amt)
         if amount_str is None:
             return
         try:
             amount = float(amount_str)
         except ValueError:
             return
-        session.add(
-            Balance(amount=amount, timestamp=datetime.utcnow(), account_id=acct.id)
-        )
-        session.commit()
+
+        try:
+            date_str = text(
+                stdscr,
+                "As of date (YYYY-MM-DD)",
+                default=date.today().strftime("%Y-%m-%d"),
+            )
+        except StopIteration:
+            date_str = None
+        if date_str:
+            try:
+                as_of = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                as_of = date.today()
+        else:
+            as_of = date.today()
+
+        first_bal = get_first_balance(session, acct.id)
+        if first_bal is None:
+            upsert_balance_for_date(session, acct.id, as_of, amount)
+            set_checkpoint(session, acct.id, as_of)
+            return
+
+        start_d = last_reconcile_date(session, acct.id)
+        proj = projected_balance_on(session, acct.id, as_of)
+        if round(proj - amount, 2) == 0.0:
+            upsert_balance_for_date(session, acct.id, as_of, amount)
+            set_checkpoint(session, acct.id, as_of)
+            return
+
+        ok = reconcile_screen(stdscr, session, acct.id, start_d, as_of, amount)
+        if not ok:
+            session.rollback()
+            return
+
+        ts = datetime.combine(as_of, time.min)
+        materialize_recurring_in_window(session, start_d, as_of, [acct.id])
+        proj_after = projected_balance_on(session, acct.id, as_of)
+        delta = round(amount - proj_after, 2)
+
+        if abs(delta) >= 0.01:
+            existing = (
+                session.query(Transaction)
+                .filter(
+                    Transaction.account_id == acct.id,
+                    Transaction.timestamp >= ts,
+                    Transaction.timestamp < ts + timedelta(days=1),
+                    Transaction.description == "Reconcile Adjustment",
+                )
+                .order_by(Transaction.id.asc())
+                .first()
+            )
+            if existing:
+                existing.amount = round((existing.amount or 0.0) + delta, 2)
+            else:
+                session.add(
+                    Transaction(
+                        account_id=acct.id,
+                        timestamp=ts,
+                        amount=delta,
+                        description="Reconcile Adjustment",
+                        origin_type="reconcile",
+                    )
+                )
+            session.commit()
+
+        upsert_balance_for_date(session, acct.id, as_of, amount)
+        set_checkpoint(session, acct.id, as_of)
+        info(stdscr, f"Reconciled to ${amount:,.2f}.")
+        if CURRENT_LEDGER_REFRESH:
+            CURRENT_LEDGER_REFRESH(ts)
     finally:
         session.close()
 
@@ -1319,23 +1750,20 @@ def ledger_rows(
     if not account_ids:
         account_ids = [ensure_default_account(session).id]
 
-    bal_map: dict[int, tuple[float, datetime]] = {}
+    first_bal_ts: dict[int, datetime] = {}
+    first_bal_amt: dict[int, float] = {}
+    earliest_tx_d: dict[int, date | None] = {}
     for aid in account_ids:
-        row = (
-            session.query(Balance)
-            .filter(Balance.account_id == aid)
-            .order_by(Balance.timestamp.desc())
-            .first()
-        )
-        amt = row.amount if row else 0.0
-        ts = (
-            row.timestamp
-            if row and row.timestamp
-            else datetime.combine(date.today(), datetime.min.time())
-        )
-        bal_map[aid] = (amt, ts)
+        fb = get_first_balance(session, aid)
+        if fb:
+            first_bal_ts[aid] = fb.timestamp
+            first_bal_amt[aid] = fb.amount or 0.0
+        else:
+            first_bal_ts[aid] = datetime.combine(date.today(), time.min)
+            first_bal_amt[aid] = 0.0
+        earliest_tx_d[aid] = earliest_posted_tx_date(session, aid)
 
-    min_bal_date = min(ts.date() for _, ts in bal_map.values())
+    min_bal_date = min(ts.date() for ts in first_bal_ts.values())
 
     if plan_start is None or plan_end is None:
         earliest_tx = (
@@ -1347,6 +1775,8 @@ def ledger_rows(
         earliest_date = earliest_tx.timestamp.date() if earliest_tx else min_bal_date
         plan_start = min(earliest_date, min_bal_date)
         plan_end = date.today() + timedelta(days=3650)  # ~10 years
+
+    posted_idx = _posted_index_for_window(session, account_ids, plan_start, date.today())
 
     txns = (
         session.query(Transaction)
@@ -1362,7 +1792,12 @@ def ledger_rows(
             r.start_date.date() if isinstance(r.start_date, datetime) else r.start_date
         )
         occs = occurrences_between(anchor, r.frequency, plan_start, plan_end)
+        lower_bound = max(
+            plan_start, earliest_tx_d[r.account_id] or first_bal_ts[r.account_id].date()
+        )
         for occ in occs:
+            if occ < lower_bound:
+                continue
             synthetic_txns.append(
                 Transaction(
                     description=r.description,
@@ -1384,7 +1819,10 @@ def ledger_rows(
             mode=IRREG_MODE,
             quantile=IRREG_QUANTILE,
         )
+        lower_bound = max(plan_start, earliest_tx_d[aid] or first_bal_ts[aid].date())
         for d, amt in irr_forecast:
+            if d < lower_bound:
+                continue
             if amt:
                 irr_series.append(
                     Transaction(
@@ -1400,6 +1838,23 @@ def ledger_rows(
         setattr(t, "_source_type", "recurring")
     for t in irr_series:
         setattr(t, "_source_type", "irregular")
+
+    def _synthetic_overlaps_posted(t: Transaction) -> bool:
+        return _overlaps_posted(
+            posted_idx,
+            t.account_id,
+            t.timestamp.date(),
+            t.amount or 0.0,
+            t.description or "",
+        )
+
+    filtered: list[Transaction] = []
+    for t in txns:
+        src = getattr(t, "_source_type", "posted")
+        if src != "posted" and _synthetic_overlaps_posted(t):
+            continue
+        filtered.append(t)
+    txns = filtered
 
     def classify_priority(t):
         src = getattr(t, "_source_type", "posted")
@@ -1436,24 +1891,19 @@ def ledger_rows(
 
     txns.sort(key=_ledger_sort_key)
 
-    def is_posted(t):
-        return getattr(t, "_source_type", "posted") == "posted"
-
     offset: dict[int, float] = {}
-    for aid, (bal_amt, bal_ts) in bal_map.items():
+    for aid in account_ids:
+        bal_ts = first_bal_ts[aid]
+        bal_amt = first_bal_amt[aid]
         total_before = 0.0
         for t in txns:
-            if t.account_id == aid and t.timestamp <= bal_ts and is_posted(t):
-                total_before += t.amount
+            if (
+                t.account_id == aid
+                and t.timestamp <= bal_ts
+                and getattr(t, "_source_type", "posted") == "posted"
+            ):
+                total_before += t.amount or 0.0
         offset[aid] = bal_amt - total_before
-
-    total_offset = sum(offset.values())
-
-    def effective_amount(t: Transaction) -> float:
-        bal_ts = bal_map[t.account_id][1]
-        if t.timestamp <= bal_ts and not is_posted(t):
-            return 0.0
-        return t.amount
 
     running_by_acct: defaultdict[int, float] = defaultdict(float)
     last_ts: datetime | None = None
@@ -1461,27 +1911,48 @@ def ledger_rows(
     for t in txns:
         if not (plan_start <= t.timestamp.date() <= plan_end):
             continue
-        assert t.account_id in account_ids
+        aid = t.account_id
+        ts_d = t.timestamp.date()
+        src = getattr(t, "_source_type", "posted")
+        first_ts_d = first_bal_ts[aid].date()
+        if ts_d < first_ts_d:
+            eff = t.amount or 0.0
+        elif first_ts_d <= ts_d <= date.today():
+            if src == "posted":
+                eff = t.amount or 0.0
+            else:
+                eff = 0.0 if _synthetic_overlaps_posted(t) else (t.amount or 0.0)
+        else:
+            eff = t.amount or 0.0
+
         if t.timestamp == last_ts:
             bump += 1
         else:
             last_ts = t.timestamp
             bump = 0
-        running_by_acct[t.account_id] += effective_amount(t)
-        running_account = running_by_acct[t.account_id] + offset[t.account_id]
-        running_total = sum(running_by_acct.values()) + total_offset
+
+        running_by_acct[aid] += eff
+        display_running = running_by_acct[aid] + offset[aid]
+        running_total = sum(running_by_acct.values()) + sum(offset.values())
         yield LedgerRow(
             t.timestamp + timedelta(microseconds=bump),
             t.account_id,
             t.description,
             t.amount,
-            running_account,
+            display_running,
             running_total,
         )
 
 
 def ledger_curses(
-    stdscr, initial_row, get_prev, get_next, bal_amt, account_names, multi
+    stdscr,
+    initial_row,
+    get_prev,
+    get_next,
+    bal_amt,
+    account_names,
+    multi,
+    status_provider=None,
 ):
     global IRREG_MODE, IRREG_QUANTILE
     rows = [initial_row]
@@ -1511,7 +1982,11 @@ def ledger_curses(
             h, w = stdscr.getmaxyx()
             h = max(1, h)
             w = max(1, w)
-            visible = h - 2 if multi else h - 1
+            has_status = status_provider is not None
+            if has_status:
+                visible = h - 3 if multi else h - 2
+            else:
+                visible = h - 2 if multi else h - 1
 
             while index < visible // 2:
                 prev_row = get_prev(rows[0].timestamp)
@@ -1539,6 +2014,14 @@ def ledger_curses(
             top = min(max(0, index - visible // 2), max(0, len(rows) - visible))
 
             stdscr.erase()
+            row_y_start = 0
+            if status_provider is not None:
+                status_line = status_provider()
+                try:
+                    stdscr.addnstr(0, 0, status_line, w - 1, curses.A_DIM)
+                except curses.error:
+                    pass
+                row_y_start = 1
             if multi:
                 header = (
                     f"{'Date'} | "
@@ -1549,12 +2032,10 @@ def ledger_curses(
                     f"{'Balance (Total)':>{tot_w}}"
                 )
                 try:
-                    stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
+                    stdscr.addnstr(row_y_start, 0, header, w - 1, curses.A_BOLD)
                 except curses.error:
                     pass
-                row_y_start = 1
-            else:
-                row_y_start = 0
+                row_y_start += 1
 
             for i in range(visible):
                 line_idx = top + i
@@ -1870,7 +2351,7 @@ def ledger_view(stdscr) -> None:
         bal = (
             session.query(Balance)
             .filter(Balance.account_id == aid)
-            .order_by(Balance.timestamp.desc())
+            .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
             .first()
         )
         if bal:
@@ -1886,13 +2367,39 @@ def ledger_view(stdscr) -> None:
     plan_start = earliest_date
     plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
     account_names = {a.id: a.name for a in accounts}
+    status_line = ""
+
+    def compute_status():
+        nonlocal status_line
+        info = []
+        for aid in account_ids:
+            fb = get_first_balance(session, aid)
+            lr = get_last_checkpoint(session, aid)
+            fb_d = fb.timestamp.date() if fb else None
+            lr_d = lr.as_of_date if lr else None
+            info.append(
+                (
+                    account_names.get(aid, str(aid)),
+                    fb_d.strftime("%Y-%m-%d") if fb_d else "n/a",
+                    lr_d.strftime("%Y-%m-%d") if lr_d else "n/a",
+                )
+            )
+        if len(info) == 1:
+            _, fb_s, lr_s = info[0]
+            status_line = (
+                f"Mode: First-balance anchored • First balance: {fb_s} • Last reconciliation: {lr_s}"
+            )
+        else:
+            parts = [f"{name}: first {fb_s}, last recon {lr_s}" for name, fb_s, lr_s in info]
+            status_line = "Mode: First-balance anchored • " + " | ".join(parts)
 
     rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
     if not rows:
         session.close()
         return
+    compute_status()
 
-    ts_list = [r.timestamp for r in rows]
+    ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
     today_date = date.today()
     start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
     if start_idx < 0:
@@ -1902,7 +2409,8 @@ def ledger_view(stdscr) -> None:
     def rebuild():
         nonlocal rows, ts_list
         rows = list(ledger_rows(session, plan_start, plan_end, account_ids))
-        ts_list = [r.timestamp for r in rows]
+        ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
+        compute_status()
 
     def refresh(ts_current: datetime):
         rebuild()
@@ -1919,7 +2427,7 @@ def ledger_view(stdscr) -> None:
         if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
             plan_start = add_months(plan_start, -EXTEND_CHUNK_MONTHS)
             rebuild()
-        idx = bisect_left(ts_list, ts_before) - 1
+        idx = bisect_left(ts_list, (ts_before, -1)) - 1
         if idx >= 0:
             return rows[idx]
         return None
@@ -1929,11 +2437,13 @@ def ledger_view(stdscr) -> None:
         if (plan_end - ts_after.date()).days <= EDGE_TRIGGER_DAYS:
             plan_end = end_of_month(plan_end, EXTEND_CHUNK_MONTHS)
             rebuild()
-        idx = bisect_right(ts_list, ts_after)
+        idx = bisect_right(ts_list, (ts_after, float("inf")))
         if idx < len(rows):
             return rows[idx]
         return None
 
+    global CURRENT_LEDGER_REFRESH
+    CURRENT_LEDGER_REFRESH = refresh
     get_prev.refresh = refresh  # type: ignore[attr-defined]
     ledger_curses(
         stdscr,
@@ -1943,7 +2453,110 @@ def ledger_view(stdscr) -> None:
         bal_amt,
         account_names,
         len(account_ids) > 1,
+        lambda: status_line,
     )
+    CURRENT_LEDGER_REFRESH = None
+    session.close()
+
+
+def open_account_ledger(stdscr, account_id: int) -> None:
+    session = SessionLocal()
+    account = session.get(Account, account_id)
+    if account is None:
+        session.close()
+        return
+    bal = (
+        session.query(Balance)
+        .filter(Balance.account_id == account_id)
+        .order_by(func.date(Balance.timestamp).desc(), Balance.id.desc())
+        .first()
+    )
+    bal_amt = bal.amount if bal else 0.0
+    earliest_tx = (
+        session.query(Transaction)
+        .filter(Transaction.account_id == account_id)
+        .order_by(Transaction.timestamp)
+        .first()
+    )
+    earliest_date = earliest_tx.timestamp.date() if earliest_tx else date.today()
+    plan_start = earliest_date
+    plan_end = end_of_month(date.today(), INITIAL_FORWARD_MONTHS)
+    account_names = {account_id: account.name}
+    status_line = ""
+
+    def compute_status():
+        nonlocal status_line
+        fb = get_first_balance(session, account_id)
+        lr = get_last_checkpoint(session, account_id)
+        fb_d = fb.timestamp.date() if fb else None
+        lr_d = lr.as_of_date if lr else None
+        fb_s = fb_d.strftime("%Y-%m-%d") if fb_d else "n/a"
+        lr_s = lr_d.strftime("%Y-%m-%d") if lr_d else "n/a"
+        status_line = (
+            f"Mode: First-balance anchored • First balance: {fb_s} • Last reconciliation: {lr_s}"
+        )
+
+    rows = list(ledger_rows(session, plan_start, plan_end, [account_id]))
+    if not rows:
+        session.close()
+        return
+    compute_status()
+    ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
+    today_date = date.today()
+    start_idx = bisect_right([r.timestamp.date() for r in rows], today_date) - 1
+    if start_idx < 0:
+        start_idx = 0
+    initial_row = rows[start_idx]
+
+    def rebuild():
+        nonlocal rows, ts_list
+        rows = list(ledger_rows(session, plan_start, plan_end, [account_id]))
+        ts_list = [(r.timestamp, i) for i, r in enumerate(rows)]
+        compute_status()
+
+    def refresh(ts_current: datetime):
+        rebuild()
+        target_date = ts_current.date()
+        date_list = [r.timestamp.date() for r in rows]
+        idx = bisect_right(date_list, target_date) - 1
+        if idx < 0:
+            idx = 0
+        return rows[idx]
+
+    def get_prev(ts_before):
+        nonlocal plan_start
+        if (ts_before.date() - plan_start).days <= EDGE_TRIGGER_DAYS:
+            plan_start = add_months(plan_start, -EXTEND_CHUNK_MONTHS)
+            rebuild()
+        idx = bisect_left(ts_list, (ts_before, -1)) - 1
+        if idx >= 0:
+            return rows[idx]
+        return None
+
+    def get_next(ts_after):
+        nonlocal plan_end
+        if (plan_end - ts_after.date()).days <= EDGE_TRIGGER_DAYS:
+            plan_end = end_of_month(plan_end, EXTEND_CHUNK_MONTHS)
+            rebuild()
+        idx = bisect_right(ts_list, (ts_after, float("inf")))
+        if idx < len(rows):
+            return rows[idx]
+        return None
+
+    global CURRENT_LEDGER_REFRESH
+    CURRENT_LEDGER_REFRESH = refresh
+    get_prev.refresh = refresh  # type: ignore[attr-defined]
+    ledger_curses(
+        stdscr,
+        initial_row,
+        get_prev,
+        get_next,
+        bal_amt,
+        account_names,
+        False,
+        lambda: status_line,
+    )
+    CURRENT_LEDGER_REFRESH = None
     session.close()
 
 
@@ -2490,7 +3103,7 @@ def main(stdscr) -> None:
                     "Edit bills",
                     "Edit income",
                     "Irregular spending",
-                    "Accounts...",
+                    "Accounts",
                     "Ledger",
                     "Set balance",
                     "Wants/Goals",
@@ -2509,8 +3122,8 @@ def main(stdscr) -> None:
                 edit_recurring(stdscr, True)
             elif choice == "Irregular spending":
                 irregular_menu(stdscr)
-            elif choice == "Accounts...":
-                accounts_menu(stdscr)
+            elif choice == "Accounts":
+                accounts_page(stdscr)
             elif choice == "Ledger":
                 ledger_view(stdscr)
             elif choice == "Set balance":
