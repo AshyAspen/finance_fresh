@@ -1,16 +1,13 @@
-from datetime import date, datetime, timedelta
 import json
 import math
 import random
+from datetime import date, datetime, timedelta
 from statistics import mean, median, stdev
 from typing import Iterable, Literal
 
 from sqlalchemy.orm import Session, object_session
 
 from .models import IrregularCategory, IrregularState, IrregularRule, Transaction
-
-
-def ensure_category(session: Session, name: str, **kwargs) -> IrregularCategory: ...
 
 
 def get_or_create_state(session: Session, category_id: int) -> IrregularState:
