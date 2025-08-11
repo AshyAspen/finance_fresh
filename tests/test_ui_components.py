@@ -17,6 +17,13 @@ def test_select_uses_scroll_menu(monkeypatch):
     monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
     monkeypatch.setattr(cli, "list_accounts", lambda s: [])
 
+    def fake_with_footer(stdscr, render):
+        def dummy_set_footer(**kwargs):
+            pass
+        return render(object(), dummy_set_footer, "left", "right")
+
+    monkeypatch.setattr(cli, "with_footer", fake_with_footer)
+
     class DummySession:
         def get(self, model, ident):
             return None
@@ -261,6 +268,13 @@ def test_select_returns_none_on_quit(monkeypatch):
 
     monkeypatch.setattr(cli, "scroll_menu", fake_scroll)
     monkeypatch.setattr(cli, "list_accounts", lambda s: [])
+
+    def fake_with_footer(stdscr, render):
+        def dummy_set_footer(**kwargs):
+            pass
+        return render(object(), dummy_set_footer, "left", "right")
+
+    monkeypatch.setattr(cli, "with_footer", fake_with_footer)
 
     class DummySession:
         def get(self, model, ident):

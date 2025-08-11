@@ -120,6 +120,87 @@ def next_event(after: datetime, txns, recs):
     return _next_event(after, txns, recs)
 
 
+def _default_footer_right() -> str:
+    """Compute default right footer text with account balances."""
+
+    footer_right = ""
+    with SessionLocal() as s:
+        if CURRENT_ACCOUNT_IDS is None:
+            accts = list_accounts(s)
+        else:
+            accts = (
+                s.query(Account)
+                .filter(Account.id.in_(CURRENT_ACCOUNT_IDS))
+                .order_by(Account.name)
+                .all()
+            )
+        if accts:
+            if len(accts) == 1:
+                acct = accts[0]
+                as_of = date.today()
+                amt = display_balance_as_of(s, acct.id, as_of)
+                footer_right = f"{acct.name}: {amt:.2f} @ {as_of:%Y-%m-%d}"
+            else:
+                parts: list[str] = []
+                for acct in accts:
+                    amt = display_balance_as_of(s, acct.id, date.today())
+                    parts.append(f"{acct.name}:{amt:.2f}")
+                footer_right = "; ".join(parts)
+    return footer_right
+
+
+def with_footer(stdscr, render):
+    """Run ``render`` within a view that provides a footer."""
+
+    h, w = stdscr.getmaxyx()
+    body_h = max(0, h - 1)
+    try:
+        body = stdscr.derwin(body_h, w, 0, 0)
+        footer_win = stdscr.derwin(1, w, h - 1, 0)
+    except curses.error:  # pragma: no cover - fake windows in tests
+        body = stdscr
+        footer_win = stdscr
+
+    footer_text = {
+        "left": date.today().isoformat(),
+        "right": _default_footer_right(),
+    }
+
+    def draw_footer():
+        try:
+            footer_win.erase()
+            footer_win.addnstr(0, 0, footer_text["left"], max(0, w))
+            footer_win.addnstr(
+                0,
+                max(0, w - len(footer_text["right"])),
+                footer_text["right"],
+                len(footer_text["right"]),
+            )
+            footer_win.noutrefresh()
+        except curses.error:  # pragma: no cover - best effort
+            pass
+
+    def set_footer(*, left=None, right=None):
+        if left is not None:
+            footer_text["left"] = left
+        if right is not None:
+            footer_text["right"] = right
+        draw_footer()
+
+    draw_footer()
+    result = render(body, set_footer, footer_text["left"], footer_text["right"])
+    draw_footer()
+    try:
+        body.noutrefresh()
+    except curses.error:  # pragma: no cover - best effort
+        pass
+    try:
+        curses.doupdate()
+    except curses.error:  # pragma: no cover - best effort
+        pass
+    return result
+
+
 def select(stdscr, message, choices, default=None, boxed=True):
     """Display a scrollable menu and return the selected value.
 
@@ -143,38 +224,18 @@ def select(stdscr, message, choices, default=None, boxed=True):
         if default is not None and value == default:
             default_idx = idx
 
-    with SessionLocal() as s:
-        footer_right = ""
-        if CURRENT_ACCOUNT_IDS is None:
-            accts = list_accounts(s)
-        else:
-            accts = (
-                s.query(Account)
-                .filter(Account.id.in_(CURRENT_ACCOUNT_IDS))
-                .order_by(Account.name)
-                .all()
-            )
-        if accts:
-            if len(accts) == 1:
-                acct = accts[0]
-                as_of = date.today()
-                amt = display_balance_as_of(s, acct.id, as_of)
-                footer_right = f"{acct.name}: {amt:.2f} @ {as_of:%Y-%m-%d}"
-            else:
-                parts: list[str] = []
-                for acct in accts:
-                    amt = display_balance_as_of(s, acct.id, date.today())
-                    parts.append(f"{acct.name}:{amt:.2f}")
-                footer_right = "; ".join(parts)
+    def render(win, set_footer, _left, right):
+        return scroll_menu(
+            win,
+            titles,
+            default_idx,
+            header=message,
+            footer_right=right,
+            boxed=boxed,
+            set_footer=set_footer,
+        )
 
-    selected = scroll_menu(
-        stdscr,
-        titles,
-        default_idx,
-        header=message,
-        footer_right=footer_right,
-        boxed=boxed,
-    )
+    selected = with_footer(stdscr, render)
     if selected is None:
         return None
     return values[selected]
@@ -1482,6 +1543,7 @@ def scroll_menu(
     allow_add: bool = False,
     allow_delete: bool = False,
     boxed: bool = False,
+    set_footer=None,
 ):
     """Display ``entries`` in a scrollable window.
 
@@ -1489,13 +1551,8 @@ def scroll_menu(
     otherwise it fills the available screen.
     """
 
-    footer_l = footer_left if footer_left is not None else date.today().isoformat()
-    footer_r = footer_right if footer_right is not None else ""
-
     max_entry_len = max((len(e) for e in entries), default=0)
-    base_width = max(
-        max_entry_len, len(header or ""), len(footer_l) + len(footer_r) + 1
-    )
+    base_width = max(max_entry_len, len(header or ""))
 
     with temp_cursor(0), keypad_mode(stdscr):
         while True:
@@ -1504,17 +1561,19 @@ def scroll_menu(
             w = max(1, w)
             offset = 1 if header else 0
             if boxed:
-                max_visible = max(1, h - 3 - offset)
+                max_visible = max(1, h - 2 - offset)
                 visible = min(len(entries), height or max_visible)
             else:
-                visible = min(len(entries), height or (h - 1 - offset))
+                visible = min(len(entries), height or (h - offset))
 
             pos = f"{index + 1}/{len(entries)}" if entries else "0/0"
-            footer_r_text = f"{footer_r} {pos}".strip()
+            if set_footer is not None:
+                right = f"{footer_right or ''} {pos}".strip()
+                set_footer(left=footer_left, right=right)
 
             if boxed:
                 content_width = min(base_width, w - 4)
-                total_height = visible + offset + 3
+                total_height = visible + offset + 2
                 with modal_box(stdscr, total_height, content_width + 4) as win:
                     if header:
                         head_x = max(0, (content_width - len(header)) // 2)
@@ -1540,18 +1599,6 @@ def scroll_menu(
                             pass
 
                     try:
-                        win.addnstr(
-                            total_height - 2, 2, footer_l, max(0, content_width)
-                        )
-                        win.addnstr(
-                            total_height - 2,
-                            2 + max(0, content_width - len(footer_r_text)),
-                            footer_r_text,
-                            len(footer_r_text),
-                        )
-                    except curses.error:
-                        pass
-                    try:
                         win.refresh()
                     except curses.error:
                         pass
@@ -1575,17 +1622,6 @@ def scroll_menu(
                         stdscr.addnstr(i + offset, 0, line, w - 1, attr)
                     except curses.error:
                         pass
-
-                try:
-                    stdscr.addnstr(h - 1, 0, footer_l, max(0, w))
-                    stdscr.addnstr(
-                        h - 1,
-                        max(0, w - len(footer_r_text)),
-                        footer_r_text,
-                        len(footer_r_text),
-                    )
-                except curses.error:
-                    pass
                 stdscr.refresh()
                 key = stdscr.getch()
 
