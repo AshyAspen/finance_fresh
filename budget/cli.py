@@ -545,74 +545,6 @@ def max_payment_today_menu(stdscr) -> None:
     toast(stdscr, f"You can safely pay ${amt:.2f} to {target.name} today.")
 
 
-def accounts_menu(stdscr) -> None:
-    global CURRENT_ACCOUNT_IDS
-    session = SessionLocal()
-    ensure_default_account(session)
-    try:
-        while True:
-            choice = select(
-                stdscr,
-                "Accounts",
-                [
-                    "All Accounts",
-                    "New Account",
-                    "Rename Account",
-                    "Delete Account",
-                    "Select Single Account",
-                    "Back",
-                ],
-                boxed=False,
-            )
-            if choice == "All Accounts":
-                CURRENT_ACCOUNT_IDS = None
-            elif choice == "New Account":
-                name = text(stdscr, "Account name")
-                if name is None:
-                    continue
-                acc_type = select(
-                    stdscr,
-                    "Account type",
-                    ["checking", "savings", "credit_card", "loan"],
-                )
-                if acc_type is None:
-                    continue
-                session.add(Account(name=name, type=acc_type))
-                session.commit()
-            elif choice == "Rename Account":
-                acct = pick_account(stdscr, session, "Rename which account")
-                if acct:
-                    new_name = text(stdscr, "New name", acct.name)
-                    if new_name is not None:
-                        acct.name = new_name
-                        session.commit()
-            elif choice == "Delete Account":
-                acct = pick_account(stdscr, session, "Delete which account")
-                if acct:
-                    has_tx = (
-                        session.query(Transaction)
-                        .filter_by(account_id=acct.id)
-                        .first()
-                        is not None
-                    )
-                    if has_tx and not confirm(
-                        stdscr, "Account has transactions; delete anyway?"
-                    ):
-                        continue
-                    session.delete(acct)
-                    session.commit()
-                    if CURRENT_ACCOUNT_IDS and acct.id in CURRENT_ACCOUNT_IDS:
-                        CURRENT_ACCOUNT_IDS = None
-            elif choice == "Select Single Account":
-                acct = pick_account(stdscr, session, "Select account")
-                if acct:
-                    CURRENT_ACCOUNT_IDS = [acct.id]
-            else:
-                break
-    finally:
-        session.close()
-
-
 def accounts_page(stdscr):
     """Shows a scrollable list of accounts."""
 
@@ -1506,56 +1438,6 @@ def settings_help_menu(stdscr) -> None:
                 IRREG_QUANTILE = "p80"
         else:
             break
-
-
-def add_months(d: date, months: int) -> date:
-    month = d.month - 1 + months
-    year = d.year + month // 12
-    month = month % 12 + 1
-    last_day = calendar.monthrange(year, month)[1]
-    if d.day == calendar.monthrange(d.year, d.month)[1]:
-        day = last_day
-    else:
-        day = min(d.day, last_day)
-    return date(year, month, day)
-
-
-def advance_date(d: date, freq: str) -> date:
-    if freq == "weekly":
-        return d + timedelta(weeks=1)
-    if freq == "biweekly":
-        return d + timedelta(weeks=2)
-    if freq == "semi monthly":
-        return d + timedelta(days=15)
-    if freq == "monthly":
-        return add_months(d, 1)
-    if freq == "quarterly":
-        return add_months(d, 3)
-    if freq == "semi annually":
-        return add_months(d, 6)
-    if freq == "annually":
-        return add_months(d, 12)
-    return d
-
-
-def retreat_date(d: date, freq: str) -> date:
-    if freq == "weekly":
-        return d - timedelta(weeks=1)
-    if freq == "biweekly":
-        return d - timedelta(weeks=2)
-    if freq == "semi monthly":
-        return d - timedelta(days=15)
-    if freq == "monthly":
-        return add_months(d, -1)
-    if freq == "quarterly":
-        return add_months(d, -3)
-    if freq == "semi annually":
-        return add_months(d, -6)
-    if freq == "annually":
-        return add_months(d, -12)
-    return d
-
-
 def months_between(start: date, end: date) -> int:
     return (end.year - start.year) * 12 + (end.month - start.month)
 
@@ -1614,27 +1496,6 @@ def occurrence_after(start: date, freq: str, after: date) -> date | None:
     return None
 
 
-def count_occurrences(start: date, freq: str, target: date) -> int:
-    if target < start:
-        return 0
-    if freq == "weekly":
-        return (target - start).days // 7 + 1
-    if freq == "biweekly":
-        return (target - start).days // 14 + 1
-    if freq == "semi monthly":
-        return (target - start).days // 15 + 1
-    step_map = {"monthly": 1, "quarterly": 3, "semi annually": 6, "annually": 12}
-    step = step_map.get(freq)
-    if step:
-        months = months_between(start, target)
-        occ = months // step
-        occ_date = add_months(start, occ * step)
-        if occ_date > target:
-            occ -= 1
-        return max(0, occ) + 1
-    return 1
-
-
 def next_event(after: datetime, txns, recs):
     next_txn = None
     txn_times = [t.timestamp for t in txns]
@@ -1667,43 +1528,6 @@ def next_event(after: datetime, txns, recs):
     ):
         return next_txn.timestamp, next_txn.description, next_txn.amount
     return next_rec_time, next_rec.description, next_rec.amount
-
-
-def prev_event(before: datetime, txns, recs):
-    prev_txn = None
-    txn_times = [t.timestamp for t in txns]
-    idx = bisect_left(txn_times, before) - 1
-    if idx >= 0:
-        prev_txn = txns[idx]
-    prev_rec = None
-    prev_rec_time = None
-    for i, r in enumerate(recs):
-        occ = occurrence_on_or_before(r.start_date.date(), r.frequency, before.date())
-        if occ is not None:
-            occ_dt = datetime.combine(occ, datetime.min.time()) + timedelta(
-                microseconds=i
-            )
-            if occ_dt >= before:
-                occ_prev = occurrence_on_or_before(
-                    r.start_date.date(), r.frequency, before.date() - timedelta(days=1)
-                )
-                if occ_prev is None:
-                    continue
-                occ_dt = datetime.combine(occ_prev, datetime.min.time()) + timedelta(
-                    microseconds=i
-                )
-            if occ_dt < before and (prev_rec_time is None or occ_dt > prev_rec_time):
-                prev_rec_time = occ_dt
-                prev_rec = r
-    if prev_txn is None and prev_rec is None:
-        return None
-    if prev_txn is not None and (
-        prev_rec_time is None or prev_txn.timestamp >= prev_rec_time
-    ):
-        return prev_txn.timestamp, prev_txn.description, prev_txn.amount
-    return prev_rec_time, prev_rec.description, prev_rec.amount
-
-
 @dataclass
 class LedgerRow:
     timestamp: datetime
