@@ -50,7 +50,6 @@ from .services import (
 )
 from .accounts import list_accounts, account_has_activity, format_account_row
 from .ui import (
-    scroll_menu,
     temp_cursor,
     keypad_mode,
     modal_box,
@@ -177,6 +176,7 @@ def with_footer(stdscr, render):
                 len(footer_text["right"]),
             )
             footer_win.noutrefresh()
+            curses.doupdate()
         except curses.error:  # pragma: no cover - best effort
             pass
 

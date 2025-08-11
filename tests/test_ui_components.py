@@ -1,4 +1,5 @@
 import pytest  # noqa: F401
+from datetime import date
 
 from tests import helpers  # noqa: F401  # ensures project root on sys.path
 from budget import cli
@@ -412,3 +413,44 @@ def test_goals_curses_help_popup(monkeypatch):
             "q: quit/back",
         ]
     ]
+
+
+def test_with_footer_places_footer_at_bottom(monkeypatch):
+    positions = []
+    doupdates = []
+
+    class FakeWin:
+        def __init__(self, h=5, w=10):
+            self.h = h
+            self.w = w
+
+        def getmaxyx(self):
+            return (self.h, self.w)
+
+        def derwin(self, h, w, y, x):
+            positions.append((h, w, y, x))
+            return SubWin()
+
+    class SubWin:
+        def erase(self):
+            pass
+
+        def addnstr(self, *args, **kwargs):
+            pass
+
+        def noutrefresh(self):
+            pass
+
+    monkeypatch.setattr(cli.curses, "doupdate", lambda: doupdates.append(1))
+    monkeypatch.setattr(cli, "_default_footer_right", lambda: "DEF")
+
+    def render(body, set_footer, left, right):
+        assert left == date.today().isoformat()
+        set_footer(left="L", right="R")
+        return "ok"
+
+    res = cli.with_footer(FakeWin(), render)
+
+    assert res == "ok"
+    assert positions == [(4, 10, 0, 0), (1, 10, 4, 0)]
+    assert doupdates  # footer draw triggered a screen update
