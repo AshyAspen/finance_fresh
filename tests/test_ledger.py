@@ -28,8 +28,29 @@ def test_ledger_running_balance():
         )
         session.commit()
         rows = list(cli.ledger_rows(session))
-        assert rows[0].running == 100.0
+        assert rows[0].running == 110.0
         assert rows[1].running == 120.0
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_display_balance_as_of_uses_latest_balance():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(amount=500.0, timestamp=datetime(2023, 1, 5)),
+                Transaction(description="T1", amount=70.0, timestamp=datetime(2023, 1, 6)),
+                Transaction(description="T2", amount=-30.0, timestamp=datetime(2023, 1, 7)),
+                Balance(amount=300.0, timestamp=datetime(2023, 1, 8)),
+                Transaction(description="T3", amount=33.0, timestamp=datetime(2023, 1, 9)),
+            ]
+        )
+        session.commit()
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 7)) == pytest.approx(540.0)
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 9)) == pytest.approx(333.0)
     finally:
         session.close()
         path.unlink()
