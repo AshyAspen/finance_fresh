@@ -1156,19 +1156,26 @@ def projected_balance_on(session, account_id: int, as_of: date) -> float:
 
 
 def display_balance_as_of(session, account_id: int, as_of: date) -> float:
-    """Return running balance for account at ``as_of`` using ledger rules."""
-    rows = [r for r in ledger_rows(session, as_of, as_of, account_ids=[account_id])]
-    if not rows:
-        fb = get_first_balance(session, account_id)
-        start_d = fb.timestamp.date() if fb else (
-            earliest_posted_tx_date(session, account_id) or as_of
+    """Return balance using latest stored balance plus subsequent transactions."""
+    end_dt = datetime.combine(as_of, datetime.max.time())
+    bal = (
+        session.query(Balance)
+        .filter(Balance.account_id == account_id, Balance.timestamp <= end_dt)
+        .order_by(Balance.timestamp.desc())
+        .first()
+    )
+    bal_amt = bal.amount if bal else 0.0
+    bal_ts = bal.timestamp if bal else datetime.combine(as_of, time.min)
+    total = (
+        session.query(func.coalesce(func.sum(Transaction.amount), 0.0))
+        .filter(
+            Transaction.account_id == account_id,
+            Transaction.timestamp > bal_ts,
+            Transaction.timestamp <= end_dt,
         )
-        rows = [
-            r
-            for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
-            if r.timestamp.date() <= as_of
-        ]
-    return rows[-1].running_account if rows else 0.0
+        .scalar()
+    )
+    return bal_amt + (total or 0.0)
 
 
 def list_transactions_since_checkpoint(
@@ -1663,6 +1670,25 @@ def ledger_rows(
     for t in irr_series:
         setattr(t, "_source_type", "irregular")
 
+    balance_rows = (
+        session.query(Balance)
+        .filter(Balance.account_id.in_(account_ids))
+        .all()
+    )
+    balance_events: list[Transaction] = []
+    for b in balance_rows:
+        balance_events.append(
+            Transaction(
+                description="Balance",
+                amount=b.amount,
+                timestamp=b.timestamp,
+                account_id=b.account_id,
+            )
+        )
+    for t in balance_events:
+        setattr(t, "_source_type", "balance")
+    txns.extend(balance_events)
+
     def _synthetic_overlaps_posted(t: Transaction) -> bool:
         return _overlaps_posted(
             posted_idx,
@@ -1675,7 +1701,7 @@ def ledger_rows(
     filtered: list[Transaction] = []
     for t in txns:
         src = getattr(t, "_source_type", "posted")
-        if src != "posted" and _synthetic_overlaps_posted(t):
+        if src not in ("posted", "balance") and _synthetic_overlaps_posted(t):
             continue
         filtered.append(t)
     txns = filtered
@@ -1687,6 +1713,8 @@ def ledger_rows(
             return (50, 0)
         if src == "recurring":
             return (20, 0) if amt > 0 else (30, 0)
+        if src == "balance":
+            return (0, 0)
         return (20, 0) if amt > 0 else (40, 0)
 
     def _ledger_sort_key(t: Transaction):
@@ -1733,11 +1761,16 @@ def ledger_rows(
     last_ts: datetime | None = None
     bump = 0
     for t in txns:
-        if not (plan_start <= t.timestamp.date() <= plan_end):
-            continue
         aid = t.account_id
         ts_d = t.timestamp.date()
         src = getattr(t, "_source_type", "posted")
+        if src == "balance":
+            display_running = running_by_acct[aid] + offset[aid]
+            diff = (t.amount or 0.0) - display_running
+            offset[aid] += diff
+            continue
+        if not (plan_start <= ts_d <= plan_end):
+            continue
         first_ts_d = first_bal_ts[aid].date()
         if ts_d < first_ts_d:
             eff = t.amount or 0.0
