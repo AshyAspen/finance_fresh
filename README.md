@@ -23,4 +23,4 @@ Run the interactive menu:
 python -m budget
 ```
 
-Use the arrow keys to move between sections and press Enter to manage the selected list. All data is stored in a local SQLite database (`transactions.db`).
+Use the arrow keys to move between sections and press Enter to open a list. Within each list, press `a` to add, `e` to edit, `d` to delete, and `q` to return. All data is stored in a local SQLite database (`transactions.db`).
