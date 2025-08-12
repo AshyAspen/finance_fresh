@@ -1,6 +1,6 @@
 # Budget CLI
 
-A simple command-line budgeting tool that records and lists transactions.
+A simple command-line budgeting tool that records and lists incomes, bills, balance points, irregular spending categories, goals, and transactions.
 
 ## Setup
 
@@ -23,8 +23,4 @@ Run the interactive menu:
 python -m budget
 ```
 
-Transactions are stored in a local SQLite database (`transactions.db`).
-
-## Recurrence rules
-
-Semi-monthly frequency is interpreted as events on the 1st and 15th of each month (clamped if the month is shorter).
+All data is stored in a local SQLite database (`transactions.db`).
