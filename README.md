@@ -23,4 +23,4 @@ Run the interactive menu:
 python -m budget
 ```
 
-All data is stored in a local SQLite database (`transactions.db`).
+Use the arrow keys to move between sections and press Enter to manage the selected list. All data is stored in a local SQLite database (`transactions.db`).
