@@ -35,6 +35,58 @@ def test_ledger_running_balance():
         path.unlink()
 
 
+def test_ledger_resets_after_balance():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Transaction(description="T1", amount=-45.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="T2", amount=-65.0, timestamp=datetime(2023, 1, 2)),
+                Transaction(description="T3", amount=75.0, timestamp=datetime(2023, 1, 3)),
+                Transaction(description="T4", amount=55.0, timestamp=datetime(2023, 1, 4)),
+                Balance(amount=500.0, timestamp=datetime(2023, 1, 5)),
+                Transaction(description="T5", amount=70.0, timestamp=datetime(2023, 1, 6)),
+                Transaction(description="T6", amount=-30.0, timestamp=datetime(2023, 1, 7)),
+                Balance(amount=300.0, timestamp=datetime(2023, 1, 8)),
+                Transaction(description="T7", amount=33.0, timestamp=datetime(2023, 1, 9)),
+                Transaction(description="T8", amount=-400.0, timestamp=datetime(2023, 1, 10)),
+                Transaction(description="T9", amount=40.0, timestamp=datetime(2023, 1, 11)),
+            ]
+        )
+        session.commit()
+        rows = list(cli.ledger_rows(session))
+        running = {r.description: r.running_account for r in rows}
+        assert running["T6"] == 540.0
+        assert running["T7"] == 333.0
+        assert running["T8"] == -67.0
+        assert running["T9"] == -27.0
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_display_balance_as_of_uses_latest_balance():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(amount=100.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="A", amount=50.0, timestamp=datetime(2023, 1, 2)),
+                Balance(amount=120.0, timestamp=datetime(2023, 1, 3)),
+                Transaction(description="B", amount=-20.0, timestamp=datetime(2023, 1, 4)),
+            ]
+        )
+        session.commit()
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 2)) == 150.0
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 3)) == 120.0
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 4)) == 100.0
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_ledger_includes_recurring():
     Session, path = get_temp_session()
     try:
