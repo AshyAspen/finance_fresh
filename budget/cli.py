@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, date, timedelta, time
+from types import SimpleNamespace
 import curses
 import calendar
 from dataclasses import dataclass
@@ -1156,19 +1157,26 @@ def projected_balance_on(session, account_id: int, as_of: date) -> float:
 
 
 def display_balance_as_of(session, account_id: int, as_of: date) -> float:
-    """Return running balance for account at ``as_of`` using ledger rules."""
-    rows = [r for r in ledger_rows(session, as_of, as_of, account_ids=[account_id])]
-    if not rows:
-        fb = get_first_balance(session, account_id)
-        start_d = fb.timestamp.date() if fb else (
-            earliest_posted_tx_date(session, account_id) or as_of
+    """Return balance at ``as_of`` from last stored balance and new transactions."""
+    as_of_ts = datetime.combine(as_of, time.max)
+    bal = (
+        session.query(Balance)
+        .filter(Balance.account_id == account_id, Balance.timestamp <= as_of_ts)
+        .order_by(Balance.timestamp.desc())
+        .first()
+    )
+    start_amt = bal.amount if bal else 0.0
+    start_ts = bal.timestamp if bal else datetime.min
+    total = (
+        session.query(func.coalesce(func.sum(Transaction.amount), 0.0))
+        .filter(
+            Transaction.account_id == account_id,
+            Transaction.timestamp > start_ts,
+            Transaction.timestamp <= as_of_ts,
         )
-        rows = [
-            r
-            for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
-            if r.timestamp.date() <= as_of
-        ]
-    return rows[-1].running_account if rows else 0.0
+        .scalar()
+    )
+    return start_amt + (total or 0.0)
 
 
 def list_transactions_since_checkpoint(
@@ -1577,9 +1585,19 @@ def ledger_rows(
     first_bal_ts: dict[int, datetime] = {}
     first_bal_amt: dict[int, float] = {}
     earliest_tx_d: dict[int, date | None] = {}
+    balances_by_acct: dict[int, list[Balance]] = defaultdict(list)
+    all_balances = (
+        session.query(Balance)
+        .filter(Balance.account_id.in_(account_ids))
+        .order_by(Balance.timestamp)
+        .all()
+    )
+    for b in all_balances:
+        balances_by_acct[b.account_id].append(b)
     for aid in account_ids:
-        fb = get_first_balance(session, aid)
-        if fb:
+        bals = balances_by_acct.get(aid, [])
+        if bals:
+            fb = bals[0]
             first_bal_ts[aid] = fb.timestamp
             first_bal_amt[aid] = fb.amount or 0.0
         else:
@@ -1658,6 +1676,22 @@ def ledger_rows(
                 )
     txns.extend(irr_series)
 
+    balance_events: list[SimpleNamespace] = []
+    for aid, bals in balances_by_acct.items():
+        for b in bals[1:]:
+            balance_events.append(
+                SimpleNamespace(
+                    id=None,
+                    timestamp=b.timestamp,
+                    account_id=b.account_id,
+                    amount=0.0,
+                    description="Balance",
+                    bal_amount=b.amount or 0.0,
+                    _source_type="balance",
+                )
+            )
+    txns.extend(balance_events)
+
     for t in synthetic_txns:
         setattr(t, "_source_type", "recurring")
     for t in irr_series:
@@ -1683,6 +1717,8 @@ def ledger_rows(
     def classify_priority(t):
         src = getattr(t, "_source_type", "posted")
         amt = t.amount or 0.0
+        if src == "balance":
+            return (10, 0)
         if src == "irregular":
             return (50, 0)
         if src == "recurring":
@@ -1738,6 +1774,12 @@ def ledger_rows(
         aid = t.account_id
         ts_d = t.timestamp.date()
         src = getattr(t, "_source_type", "posted")
+        if src == "balance":
+            offset[aid] = getattr(t, "bal_amount", 0.0)
+            running_by_acct[aid] = 0.0
+            last_ts = t.timestamp
+            bump = 0
+            continue
         first_ts_d = first_bal_ts[aid].date()
         if ts_d < first_ts_d:
             eff = t.amount or 0.0
@@ -1757,6 +1799,8 @@ def ledger_rows(
 
         running_by_acct[aid] += eff
         display_running = running_by_acct[aid] + offset[aid]
+        if ts_d < first_ts_d:
+            display_running -= eff
         running_total = sum(running_by_acct.values()) + sum(offset.values())
         yield LedgerRow(
             t.timestamp + timedelta(microseconds=bump),
