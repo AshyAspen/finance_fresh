@@ -1156,19 +1156,55 @@ def projected_balance_on(session, account_id: int, as_of: date) -> float:
 
 
 def display_balance_as_of(session, account_id: int, as_of: date) -> float:
-    """Return running balance for account at ``as_of`` using ledger rules."""
-    rows = [r for r in ledger_rows(session, as_of, as_of, account_ids=[account_id])]
-    if not rows:
-        fb = get_first_balance(session, account_id)
-        start_d = fb.timestamp.date() if fb else (
-            earliest_posted_tx_date(session, account_id) or as_of
+    """Return balance using stored snapshots and posted transactions."""
+    day_end = datetime.combine(as_of, time.max)
+
+    last_bal = (
+        session.query(Balance)
+        .filter(Balance.account_id == account_id, Balance.timestamp <= day_end)
+        .order_by(Balance.timestamp.desc())
+        .first()
+    )
+    if last_bal is not None:
+        base = last_bal.amount or 0.0
+        tx_sum = (
+            session.query(func.coalesce(func.sum(Transaction.amount), 0.0))
+            .filter(
+                Transaction.account_id == account_id,
+                Transaction.timestamp > last_bal.timestamp,
+                Transaction.timestamp <= day_end,
+            )
+            .scalar()
         )
-        rows = [
-            r
-            for r in ledger_rows(session, start_d, as_of, account_ids=[account_id])
-            if r.timestamp.date() <= as_of
-        ]
-    return rows[-1].running_account if rows else 0.0
+        return float(round(base + (tx_sum or 0.0), 2))
+
+    next_bal = (
+        session.query(Balance)
+        .filter(Balance.account_id == account_id, Balance.timestamp > day_end)
+        .order_by(Balance.timestamp.asc())
+        .first()
+    )
+    if next_bal is not None:
+        tx_sum = (
+            session.query(func.coalesce(func.sum(Transaction.amount), 0.0))
+            .filter(
+                Transaction.account_id == account_id,
+                Transaction.timestamp > day_end,
+                Transaction.timestamp <= next_bal.timestamp,
+            )
+            .scalar()
+        )
+        return float(round((next_bal.amount or 0.0) - (tx_sum or 0.0), 2))
+
+    tx_sum = (
+        session.query(func.coalesce(func.sum(Transaction.amount), 0.0))
+        .filter(
+            Transaction.account_id == account_id,
+            Transaction.timestamp <= day_end,
+        )
+        .scalar()
+    )
+    return float(round(tx_sum or 0.0, 2))
 
 
 def list_transactions_since_checkpoint(
@@ -1680,6 +1716,16 @@ def ledger_rows(
         filtered.append(t)
     txns = filtered
 
+    balances = (
+        session.query(Balance)
+        .filter(Balance.account_id.in_(account_ids))
+        .order_by(Balance.timestamp)
+        .all()
+    )
+    balances_by_acct: dict[int, list[Balance]] = defaultdict(list)
+    for b in balances:
+        balances_by_acct[b.account_id].append(b)
+
     def classify_priority(t):
         src = getattr(t, "_source_type", "posted")
         amt = t.amount or 0.0
@@ -1730,6 +1776,7 @@ def ledger_rows(
         offset[aid] = bal_amt - total_before
 
     running_by_acct: defaultdict[int, float] = defaultdict(float)
+    bal_pos = {aid: 0 for aid in account_ids}
     last_ts: datetime | None = None
     bump = 0
     for t in txns:
@@ -1737,6 +1784,13 @@ def ledger_rows(
             continue
         aid = t.account_id
         ts_d = t.timestamp.date()
+        # apply any balances up to this transaction
+        bal_list = balances_by_acct.get(aid, [])
+        while bal_pos[aid] < len(bal_list) and bal_list[bal_pos[aid]].timestamp <= t.timestamp:
+            offset[aid] = bal_list[bal_pos[aid]].amount or 0.0
+            running_by_acct[aid] = 0.0
+            bal_pos[aid] += 1
+
         src = getattr(t, "_source_type", "posted")
         first_ts_d = first_bal_ts[aid].date()
         if ts_d < first_ts_d:
