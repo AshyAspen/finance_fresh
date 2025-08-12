@@ -35,6 +35,49 @@ def test_ledger_running_balance():
         path.unlink()
 
 
+def test_ledger_resets_after_balance():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(amount=500.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="T1", amount=70.0, timestamp=datetime(2023, 1, 2)),
+                Transaction(description="T2", amount=-30.0, timestamp=datetime(2023, 1, 3)),
+                Balance(amount=300.0, timestamp=datetime(2023, 1, 4)),
+                Transaction(description="T3", amount=33.0, timestamp=datetime(2023, 1, 5)),
+            ]
+        )
+        session.commit()
+        rows = list(cli.ledger_rows(session))
+        assert [r.running for r in rows] == [570.0, 540.0, 333.0]
+    finally:
+        session.close()
+        path.unlink()
+
+
+def test_display_balance_uses_latest_snapshot():
+    Session, path = get_temp_session()
+    try:
+        session = Session()
+        session.add_all(
+            [
+                Balance(amount=500.0, timestamp=datetime(2023, 1, 1)),
+                Transaction(description="T1", amount=70.0, timestamp=datetime(2023, 1, 2)),
+                Transaction(description="T2", amount=-30.0, timestamp=datetime(2023, 1, 3)),
+                Balance(amount=300.0, timestamp=datetime(2023, 1, 4)),
+                Transaction(description="T3", amount=33.0, timestamp=datetime(2023, 1, 5)),
+            ]
+        )
+        session.commit()
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 3)) == 540.0
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 4)) == 300.0
+        assert cli.display_balance_as_of(session, 1, date(2023, 1, 5)) == 333.0
+    finally:
+        session.close()
+        path.unlink()
+
+
 def test_ledger_includes_recurring():
     Session, path = get_temp_session()
     try:
