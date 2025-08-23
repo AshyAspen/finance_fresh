@@ -19,6 +19,8 @@ DEBUG_SETTINGS = {
     'ledger_days': 60,
     'auto_balance_creation': True, 
     'show_debug_info': True,
+    'auto_advance_cursor': False,  # Default to stay in place after toggle
+    'prediction_method': 'deterministic',  # 'deterministic' or 'monte_carlo'
     'backup_created': False
 }
 
@@ -29,13 +31,30 @@ def enable_debug_mode() -> None:
     DEBUG_MODE = True
     
     # Create backup of existing database
-    backup_database()
+    if backup_database():
+        DEBUG_SETTINGS['backup_created'] = True
+    else:
+        print("⚠️  Failed to create backup!")
+        response = input("Continue with debug mode anyway? (y/N): ").lower()
+        if response != 'y':
+            print("Debug mode cancelled")
+            DEBUG_MODE = False
+            return
     
-    # Load test data
-    print("🔧 Debug mode enabled - loading test data...")
-    create_test_data()
-    DEBUG_SETTINGS['backup_created'] = True
-    print("✅ Debug environment ready!")
+    try:
+        # Load test data
+        print("🔧 Debug mode enabled - loading test data...")
+        create_test_data()
+        print("✅ Debug environment ready!")
+    except Exception as e:
+        print(f"❌ Error creating test data: {e}")
+        if DEBUG_SETTINGS.get('backup_created'):
+            print("🔄 Restoring original database...")
+            restore_database()
+        else:
+            print("⚠️  No backup available - database may be in inconsistent state")
+        DEBUG_MODE = False
+        raise
 
 
 def disable_debug_mode() -> None:
@@ -139,6 +158,16 @@ def set_ledger_days(days: int) -> None:
 def get_ledger_days() -> int:
     """Get current ledger calculation days."""
     return DEBUG_SETTINGS.get('ledger_days', 60)
+
+
+def get_auto_advance_cursor() -> bool:
+    """Get current auto-advance cursor setting."""
+    return DEBUG_SETTINGS.get('auto_advance_cursor', False)
+
+
+def get_prediction_method() -> str:
+    """Get current irregular prediction method."""
+    return DEBUG_SETTINGS.get('prediction_method', 'deterministic')
 
 
 def parse_custom_date(date_str: str) -> Optional[int]:

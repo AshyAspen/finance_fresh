@@ -182,6 +182,51 @@ def _generate_recurring_transactions(recurring: Recurring, start_date: date, end
     return transactions
 
 
+def _generate_irregular_transactions(session: Session, account_id: int, start_date: date, end_date: date) -> List[Transaction]:
+    """Generate predicted irregular transactions for the account within date range."""
+    try:
+        from .irregular_predictions import predict_irregular_transactions
+        
+        # Get prediction method from debug settings if available
+        method = "deterministic"  # Default
+        try:
+            from . import debug
+            if debug.is_debug_mode():
+                method = debug.get_prediction_method()
+        except ImportError:
+            pass
+        
+        # Get predictions from the engine
+        predictions = predict_irregular_transactions(
+            session, account_id, start_date, end_date, method
+        )
+        
+        # Convert PredictedTransaction objects to Transaction objects for ledger
+        irregular_transactions = []
+        for pred in predictions:
+            # Create virtual transaction for ledger calculation
+            tx = Transaction(
+                description=pred.description,
+                amount=pred.amount,
+                timestamp=datetime.combine(pred.date, datetime.min.time()),
+                account_id=pred.account_id,
+                origin_type='irregular',
+                origin_id=pred.category_id,
+                origin_occurrence_date=pred.date,
+                category_id=pred.category_id
+            )
+            irregular_transactions.append(tx)
+            
+        return irregular_transactions
+        
+    except ImportError:
+        # Irregular predictions module not available, return empty list
+        return []
+    except Exception:
+        # Any other error in prediction generation, fail gracefully
+        return []
+
+
 def calculate_ledger(session: Session, account_id: int, start_date: date, end_date: date, initial_balance: float) -> List[LedgerEntry]:
     """Calculate ledger with running balances for an account, showing only days with transactions."""
     
@@ -201,8 +246,11 @@ def calculate_ledger(session: Session, account_id: int, start_date: date, end_da
     for recurring in recurring_items:
         recurring_transactions.extend(_generate_recurring_transactions(recurring, start_date, end_date))
     
+    # Get irregular spending predictions
+    irregular_transactions = _generate_irregular_transactions(session, account_id, start_date, end_date)
+    
     # Combine all transactions and sort by date
-    all_transactions = transactions + recurring_transactions
+    all_transactions = transactions + recurring_transactions + irregular_transactions
     all_transactions.sort(key=lambda x: x.timestamp)
     
     # Group transactions by date
@@ -221,7 +269,14 @@ def calculate_ledger(session: Session, account_id: int, start_date: date, end_da
         # Process all transactions for this day
         for tx in day_transactions:
             current_balance += tx.amount
-            tx_type = 'recurring' if hasattr(tx, 'origin_type') and tx.origin_type == 'recurring' else 'transaction'
+            
+            # Determine transaction type based on origin
+            if hasattr(tx, 'origin_type') and tx.origin_type == 'recurring':
+                tx_type = 'recurring'
+            elif hasattr(tx, 'origin_type') and tx.origin_type == 'irregular':
+                tx_type = 'irregular'
+            else:
+                tx_type = 'transaction'
             
             # Add individual transaction entry
             ledger_entries.append(LedgerEntry(

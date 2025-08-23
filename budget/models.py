@@ -52,6 +52,8 @@ class Transaction(Base):
     origin_type = Column(String, nullable=True)
     origin_id = Column(Integer, nullable=True)
     origin_occurrence_date = Column(Date, nullable=True)
+    # link to irregular category for spending pattern analysis
+    category_id = Column(Integer, ForeignKey("irregular_categories.id"), nullable=True)
 
     __table_args__ = (
         Index(

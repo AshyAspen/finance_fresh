@@ -145,6 +145,32 @@ def _add_item(stdscr, model: ModelType) -> None:
                 if not frequency_key:  # User cancelled
                     return
                 data[c] = frequency_key
+            # Special handling for account_id fields - use account picker
+            elif c == "account_id" or c == "to_account_id":
+                if c == "to_account_id":
+                    # to_account_id is optional, allow skip
+                    skip = _prompt(stdscr, f"Set {c}? (y/N): ").lower()
+                    if skip != 'y':
+                        data[c] = None
+                        continue
+                
+                account_id = _account_picker(stdscr)
+                if account_id is None:  # User cancelled
+                    if c == "account_id":  # Required field
+                        return
+                    else:  # Optional field
+                        data[c] = None
+                else:
+                    data[c] = account_id
+            # Special handling for category_id field - use category picker
+            elif c == "category_id":
+                # category_id is optional, allow skip
+                skip = _prompt(stdscr, f"Set irregular category? (y/N): ").lower()
+                if skip != 'y':
+                    data[c] = None
+                else:
+                    category_id = _category_picker(stdscr)
+                    data[c] = category_id
             else:
                 # Normal text input for all other fields
                 val = _prompt(stdscr, f"{c}: ")
@@ -183,6 +209,34 @@ def _edit_item(stdscr, model: ModelType) -> None:
                     frequency_key = _frequency_picker(stdscr)
                     if frequency_key:  # User didn't cancel
                         setattr(obj, c, frequency_key)
+            # Special handling for account_id fields - use account picker
+            elif c == "account_id" or c == "to_account_id":
+                # Get current account name for display
+                current_account = None
+                if cur:
+                    current_account = session.get(Account, int(cur))
+                
+                account_display = f"{current_account.name}" if current_account else "None"
+                change = _prompt(stdscr, f"{c} [{account_display}] - change? (y/N): ").lower()
+                
+                if change == 'y':
+                    account_id = _account_picker(stdscr)
+                    if account_id is not None:  # User didn't cancel
+                        setattr(obj, c, account_id)
+            # Special handling for category_id field - use category picker
+            elif c == "category_id":
+                # Get current category name for display
+                current_category = None
+                if cur:
+                    current_category = session.get(IrregularCategory, int(cur))
+                
+                category_display = f"{current_category.name}" if current_category else "None"
+                change = _prompt(stdscr, f"irregular category [{category_display}] - change? (y/N): ").lower()
+                
+                if change == 'y':
+                    category_id = _category_picker(stdscr)
+                    if category_id is not None:  # User didn't cancel (None means unassign)
+                        setattr(obj, c, category_id)
             else:
                 # Normal text input for all other fields
                 val = _prompt(stdscr, f"{c} [{cur}]: ")
@@ -232,7 +286,9 @@ def _account_picker(stdscr) -> Optional[int]:
     with SessionLocal() as session:
         accounts = session.query(Account).filter(Account.archived == False).all()
         if not accounts:
-            _prompt(stdscr, "No accounts found - press Enter")
+            create = _prompt(stdscr, "No accounts found. Create one? (y/N): ").lower()
+            if create == 'y':
+                return _create_account_prompt(stdscr)
             return None
         
         if len(accounts) == 1:
@@ -290,6 +346,80 @@ def _account_picker(stdscr) -> Optional[int]:
     return None
 
 
+def _category_picker(stdscr) -> Optional[int]:
+    """Show a menu to pick an irregular category and return the category ID."""
+    with SessionLocal() as session:
+        categories = session.query(IrregularCategory).filter(IrregularCategory.active == True).order_by(IrregularCategory.name).all()
+        if not categories:
+            create = _prompt(stdscr, "No categories found. Create one? (y/N): ").lower()
+            if create == 'y':
+                _add_item(stdscr, IrregularCategory)
+                # Get the most recently created category
+                categories = session.query(IrregularCategory).order_by(IrregularCategory.id.desc()).limit(1).all()
+                if categories:
+                    return categories[0].id
+            return None
+        
+        if len(categories) == 1:
+            return categories[0].id
+    
+    # Show category picker interface
+    stdscr.clear()
+    h, w = stdscr.getmaxyx()
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    
+    idx = 0
+    
+    while True:
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Select Irregular Category:")
+        
+        # Add "None" option at the top
+        options = [("None (no category)", None)] + [(cat.name, cat.id) for cat in categories]
+        
+        for i, (display_name, cat_id) in enumerate(options):
+            if i == idx:
+                stdscr.attron(curses.A_REVERSE)
+            
+            stdscr.addstr(2 + i, 2, display_name)
+            
+            if i == idx:
+                stdscr.attroff(curses.A_REVERSE)
+        
+        stdscr.addstr(h - 2, 0, "↑↓ to navigate, Enter to select, q to cancel")
+        stdscr.refresh()
+        
+        key = stdscr.getch()
+        
+        if key in (curses.KEY_UP, ord("k")):
+            idx = (idx - 1) % len(options)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            idx = (idx + 1) % len(options)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            return options[idx][1]  # Return category ID (or None)
+        elif key in (ord("q"), ord("Q")):
+            return None
+
+
+def _create_account_prompt(stdscr) -> Optional[int]:
+    """Create a new account and return its ID."""
+    cols = _get_columns(Account)
+    with SessionLocal() as session:
+        data = {}
+        for c in cols:
+            if c == "id":
+                continue
+            col = inspect(Account).columns[c]
+            val = _prompt(stdscr, f"{c}: ")
+            data[c] = _parse_value(col, val)
+        
+        account = Account(**data)
+        session.add(account)
+        session.commit()
+        return account.id
+
+
 def _display_ledger(stdscr, entries: List[LedgerEntry], account_name: str) -> None:
     """Display ledger entries in a scrollable table with curses formatting."""
     scroll_offset = 0  # Track current position in the ledger list for scrolling
@@ -338,6 +468,9 @@ def _display_ledger(stdscr, entries: List[LedgerEntry], account_name: str) -> No
             if entry.transaction_type == 'recurring':
                 # Dim recurring transactions to distinguish from one-time transactions
                 stdscr.attron(curses.A_DIM)
+            elif entry.transaction_type == 'irregular':
+                # Use italic and dim for predicted irregular spending
+                stdscr.attron(curses.A_ITALIC | curses.A_DIM)
             elif entry.amount < 0:
                 # Bold negative amounts (expenses) to make them stand out
                 stdscr.attron(curses.A_BOLD)
@@ -348,6 +481,7 @@ def _display_ledger(stdscr, entries: List[LedgerEntry], account_name: str) -> No
             # Reset text attributes after each row to prevent bleeding into next row
             stdscr.attroff(curses.A_DIM)
             stdscr.attroff(curses.A_BOLD)
+            stdscr.attroff(curses.A_ITALIC)
         
         # Display scroll position information for user orientation
         if entries:
@@ -439,13 +573,223 @@ def _ledger_screen(stdscr) -> None:
             break  # Exit ledger functionality entirely
 
 
+def _irregular_categories_screen(stdscr) -> None:
+    """Show irregular categories and let user select one to manage transactions."""
+    while True:
+        with SessionLocal() as session:
+            categories = session.query(IrregularCategory).filter(
+                IrregularCategory.active == True
+            ).order_by(IrregularCategory.name).all()
+            
+            if not categories:
+                # No categories exist - offer to create one
+                create = _prompt(stdscr, "No irregular categories found. Create one? (y/N): ").lower()
+                if create == 'y':
+                    _add_item(stdscr, IrregularCategory)
+                    continue  # Refresh the list
+                else:
+                    return
+        
+        # Display categories for selection
+        stdscr.clear()
+        h, w = stdscr.getmaxyx()
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        
+        idx = 0
+        
+        while True:
+            stdscr.clear()
+            stdscr.addstr(0, 0, "Irregular Categories:")
+            
+            # Display each category
+            for i, category in enumerate(categories):
+                if i == idx:
+                    stdscr.attron(curses.A_REVERSE)
+                
+                # Show category name and some basic info
+                display_text = f"{category.name}"
+                if hasattr(category, 'account_id') and category.account_id:
+                    account = session.get(Account, category.account_id)
+                    if account:
+                        display_text += f" ({account.name})"
+                
+                stdscr.addstr(2 + i, 2, display_text)
+                
+                if i == idx:
+                    stdscr.attroff(curses.A_REVERSE)
+            
+            # Show menu options
+            stdscr.addstr(h - 4, 0, "(a)dd category (d)elete category")
+            stdscr.addstr(h - 3, 0, "↑↓ to navigate, Enter to manage transactions")
+            stdscr.addstr(h - 2, 0, "q to go back")
+            stdscr.refresh()
+            
+            key = stdscr.getch()
+            
+            if key in (curses.KEY_UP, ord("k")):
+                idx = (idx - 1) % len(categories)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                idx = (idx + 1) % len(categories)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                # Enter selected category's transaction management
+                selected_category = categories[idx]
+                _category_transaction_screen(stdscr, selected_category.id)
+                break  # Refresh categories list
+            elif key == ord("a"):
+                _add_item(stdscr, IrregularCategory)
+                break  # Refresh categories list
+            elif key == ord("d"):
+                if categories:
+                    category_id = categories[idx].id
+                    confirm = _prompt(stdscr, f"Delete '{categories[idx].name}'? (y/N): ").lower()
+                    if confirm == 'y':
+                        category_to_delete = session.get(IrregularCategory, category_id)
+                        if category_to_delete:
+                            session.delete(category_to_delete)
+                            session.commit()
+                    break  # Refresh categories list
+            elif key in (ord("q"), ord("Q")):
+                return
+
+
+def _category_transaction_screen(stdscr, category_id: int) -> None:
+    """Show transactions for a category with toggle interface."""
+    with SessionLocal() as session:
+        category = session.get(IrregularCategory, category_id)
+        if not category:
+            _prompt(stdscr, "Category not found - press Enter")
+            return
+        
+        category_name = category.name
+        
+        while True:
+            # Get all transactions (we'll show assigned and unassigned)
+            all_transactions = session.query(Transaction).order_by(Transaction.timestamp.desc()).all()
+            
+            if not all_transactions:
+                stdscr.clear()
+                stdscr.addstr(0, 0, f"Manage Transactions: {category_name}")
+                stdscr.addstr(2, 0, "No transactions found.")
+                stdscr.addstr(4, 0, "(a)dd transaction (q)back")
+                stdscr.refresh()
+                
+                key = stdscr.getch()
+                if key == ord("a"):
+                    _add_item(stdscr, Transaction)
+                    continue
+                elif key in (ord("q"), ord("Q")):
+                    return
+                continue
+            
+            # Display scrollable transaction list with toggle interface
+            selected_idx = 0  # Track which transaction is currently selected
+            
+            while True:
+                stdscr.clear()
+                h, w = stdscr.getmaxyx()
+                
+                stdscr.addstr(0, 0, f"Manage Transactions: {category_name}")
+                
+                # Calculate scroll offset based on selection
+                max_visible = h - 6  # Reserve space for header and instructions
+                scroll_offset = max(0, min(selected_idx - max_visible // 2, len(all_transactions) - max_visible))
+                visible_transactions = all_transactions[scroll_offset:scroll_offset + max_visible]
+                
+                # Display transactions with toggle state
+                for i, tx in enumerate(visible_transactions):
+                    row = 2 + i
+                    absolute_idx = scroll_offset + i
+                    is_assigned = (tx.category_id == category_id)
+                    is_selected = (absolute_idx == selected_idx)
+                    
+                    # Format transaction display
+                    tx_date = tx.timestamp.strftime("%Y-%m-%d") if tx.timestamp else "No date"
+                    tx_amount = f"${tx.amount:,.2f}" if tx.amount else "$0.00"
+                    tx_desc = (tx.description or "No description")[:30]  # Truncate long descriptions
+                    
+                    display_line = f"{tx_date} | {tx_desc:<30} | {tx_amount:>10}"
+                    
+                    # Apply visual styling: selection highlight first
+                    if is_selected:
+                        stdscr.attron(curses.A_REVERSE)
+                    
+                    # Then apply assignment styling
+                    if is_assigned:
+                        stdscr.attron(curses.A_BOLD)
+                    else:
+                        stdscr.attron(curses.A_DIM)
+                    
+                    stdscr.addstr(row, 2, display_line[:w-4])  # Leave margin
+                    
+                    # Reset all attributes
+                    stdscr.attroff(curses.A_REVERSE)
+                    stdscr.attroff(curses.A_BOLD)
+                    stdscr.attroff(curses.A_DIM)
+                
+                # Show scroll info and instructions
+                if all_transactions:
+                    start_num = scroll_offset + 1
+                    end_num = min(scroll_offset + len(visible_transactions), len(all_transactions))
+                    scroll_info = f"Showing {start_num}-{end_num} of {len(all_transactions)} transactions (Selected: {selected_idx + 1})"
+                    stdscr.addstr(h - 5, 0, scroll_info)
+                
+                stdscr.addstr(h - 4, 0, "Bold = assigned, Dim = not assigned, Reverse = selected")
+                stdscr.addstr(h - 3, 0, "↑↓ to navigate, Space to toggle assignment")
+                stdscr.addstr(h - 2, 0, "(a)dd transaction (q)back")
+                stdscr.refresh()
+                
+                key = stdscr.getch()
+                
+                if key in (curses.KEY_UP, ord("k")):
+                    if selected_idx > 0:
+                        selected_idx -= 1
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    if selected_idx < len(all_transactions) - 1:
+                        selected_idx += 1
+                elif key == ord(" "):  # Spacebar to toggle
+                    if selected_idx < len(all_transactions):
+                        selected_tx = all_transactions[selected_idx]
+                        
+                        # Toggle assignment
+                        if selected_tx.category_id == category_id:
+                            # Currently assigned - unassign
+                            selected_tx.category_id = None
+                        else:
+                            # Not assigned to this category - assign it
+                            selected_tx.category_id = category_id
+                        
+                        # Commit the change
+                        session.commit()
+                        
+                        # Check debug setting for auto-advance behavior
+                        should_advance = False
+                        try:
+                            from . import debug
+                            if debug.is_debug_mode():
+                                should_advance = debug.get_auto_advance_cursor()
+                        except ImportError:
+                            pass  # Debug module not available, stay in place
+                        
+                        # Move selection down if configured to do so
+                        if should_advance and selected_idx < len(all_transactions) - 1:
+                            selected_idx += 1
+                elif key == ord("a"):
+                    _add_item(stdscr, Transaction)
+                    break  # Refresh transaction list
+                elif key in (ord("q"), ord("Q")):
+                    return
+
+
 def _get_menu_items():
     """Get menu items, including debug menu if in debug mode."""
     items = [
+        ("Accounts", Account, None),
         ("Incomes", Recurring, Recurring.amount > 0),
         ("Bills", Recurring, Recurring.amount <= 0),
         ("Balance Points", Balance, None),
-        ("Irregular Spending", IrregularCategory, None),
+        ("Irregular Categories", "irregular_categories", None),
+        ("Irregular Spending (Debug)", IrregularCategory, None),
         ("Goals", Goal, None),
         ("Transactions", Transaction, None),
         ("Ledger", "ledger", None),
@@ -505,11 +849,15 @@ def _debug_settings_screen(stdscr) -> None:
         stdscr.addstr(13, 2, f"Ledger Days: {settings.get('ledger_days', 60)}")
         stdscr.addstr(14, 2, f"Auto Balance Creation: {'✅' if settings.get('auto_balance_creation') else '❌'}")
         stdscr.addstr(15, 2, f"Show Debug Info: {'✅' if settings.get('show_debug_info') else '❌'}")
+        stdscr.addstr(16, 2, f"Auto Advance Cursor: {'✅' if settings.get('auto_advance_cursor') else '❌'}")
+        stdscr.addstr(17, 2, f"Prediction Method: {settings.get('prediction_method', 'deterministic').title()}")
         
         # Instructions
-        stdscr.addstr(h - 4, 0, "Actions:")
-        stdscr.addstr(h - 3, 0, "d) Change ledger days  r) Reload test data")
-        stdscr.addstr(h - 2, 0, "c) Create balance point  q) Back to menu")
+        stdscr.addstr(h - 6, 0, "Actions:")
+        stdscr.addstr(h - 5, 0, "d) Change ledger days  a) Toggle auto advance")
+        stdscr.addstr(h - 4, 0, "p) Toggle prediction method  r) Reload test data")
+        stdscr.addstr(h - 3, 0, "c) Create balance point")
+        stdscr.addstr(h - 2, 0, "q) Back to menu")
         stdscr.refresh()
         
         # Handle user input
@@ -518,6 +866,20 @@ def _debug_settings_screen(stdscr) -> None:
         if key in (ord("d"), ord("D")):
             # Change ledger days
             _change_ledger_days(stdscr, debug)
+            
+        elif key in (ord("a"), ord("A")):
+            # Toggle auto advance cursor
+            current = debug.get_auto_advance_cursor()
+            debug.update_debug_setting('auto_advance_cursor', not current)
+            status = "enabled" if not current else "disabled"
+            _prompt(stdscr, f"Auto advance cursor {status} - press Enter")
+            
+        elif key in (ord("p"), ord("P")):
+            # Toggle prediction method
+            current = debug.get_prediction_method()
+            new_method = "monte_carlo" if current == "deterministic" else "deterministic"
+            debug.update_debug_setting('prediction_method', new_method)
+            _prompt(stdscr, f"Prediction method set to {new_method.replace('_', ' ').title()} - press Enter")
             
         elif key in (ord("r"), ord("R")):
             # Reload test data
@@ -667,6 +1029,9 @@ def _run_menu(stdscr):
             elif model == "ledger":
                 # Special case for ledger screen
                 _ledger_screen(stdscr)
+            elif model == "irregular_categories":
+                # Special case for irregular categories screen
+                _irregular_categories_screen(stdscr)
             elif model == "debug_settings":
                 # Special case for debug settings screen
                 _debug_settings_screen(stdscr)

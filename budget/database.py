@@ -121,6 +121,11 @@ def init_db() -> None:
                 "account_id, origin_type, origin_id, origin_occurrence_date)"
             )
         )
+        
+        # Add category_id column to transactions if it doesn't exist
+        if "category_id" not in cols:
+            conn.execute(text("ALTER TABLE transactions ADD COLUMN category_id INTEGER REFERENCES irregular_categories(id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_transactions_category_id ON transactions(category_id)"))
 
         cols = [r[1] for r in conn.execute(text("PRAGMA table_info(recurring)"))]
         if "transfer_id" not in cols:

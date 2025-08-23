@@ -135,11 +135,114 @@ def create_test_data():
         for item in recurring_income + recurring_bills:
             session.add(item)
         
+        # Create irregular categories for testing first
+        irregular_categories = [
+            IrregularCategory(
+                name="Groceries",
+                account_id=checking.id,
+                window_days=30,  # Monthly analysis window
+                alpha=0.3,
+                safety_quantile=0.8
+            ),
+            IrregularCategory(
+                name="Car Maintenance",
+                account_id=checking.id,
+                window_days=120,
+                alpha=0.3,
+                safety_quantile=0.8
+            ),
+            IrregularCategory(
+                name="Entertainment",
+                account_id=checking.id,
+                window_days=60,
+                alpha=0.3,
+                safety_quantile=0.8
+            ),
+            IrregularCategory(
+                name="Medical",
+                account_id=checking.id,
+                window_days=90,
+                alpha=0.3,
+                safety_quantile=0.8
+            )
+        ]
+        
+        for category in irregular_categories:
+            session.add(category)
+        
+        session.commit()  # Commit categories first to get their IDs
+        
         # Create some one-time transactions from the past 30 days
         one_time_transactions = []
         
-        # Generate random transactions over the past 30 days
-        for i in range(25):  # 25 random transactions
+        # Get category mapping for transaction tagging
+        category_map = {cat.name: cat.id for cat in irregular_categories}
+        
+        # Generate irregular spending transactions with realistic patterns
+        # Groceries: Weekly pattern, Saturdays/Sundays preferred
+        for week in range(8):  # 8 weeks of grocery history
+            days_ago = (week * 7) + random.choice([5, 6])  # Saturday or Sunday
+            if days_ago <= 30:  # Only within last 30 days
+                transaction_date = datetime.now() - timedelta(days=days_ago)
+                amount = -random.uniform(120, 180)  # $120-180 groceries
+                transaction = Transaction(
+                    description=random.choice(["Kroger", "Walmart", "Whole Foods", "Target Groceries"]),
+                    amount=round(amount, 2),
+                    timestamp=transaction_date,
+                    account_id=checking.id,
+                    category_id=category_map["Groceries"]
+                )
+                one_time_transactions.append(transaction)
+        
+        # Car Maintenance: Longer intervals, variable amounts
+        maintenance_dates = [45, 120, 180]  # Days ago
+        for days_ago in maintenance_dates:
+            if days_ago <= 180:  # Include older history for pattern learning
+                transaction_date = datetime.now() - timedelta(days=days_ago)
+                amount = -random.uniform(80, 350)  # Variable maintenance costs
+                transaction = Transaction(
+                    description=random.choice(["Oil Change", "Tire Rotation", "Brake Service", "Auto Repair"]),
+                    amount=round(amount, 2),
+                    timestamp=transaction_date,
+                    account_id=checking.id,
+                    category_id=category_map["Car Maintenance"]
+                )
+                one_time_transactions.append(transaction)
+        
+        # Entertainment: Irregular pattern, weekends preferred
+        for i in range(12):  # 12 entertainment transactions
+            days_ago = random.randint(5, 60)
+            # Bias toward weekends
+            transaction_date = datetime.now() - timedelta(days=days_ago)
+            while transaction_date.weekday() not in [4, 5, 6]:  # Fri, Sat, Sun
+                transaction_date += timedelta(days=1)
+            
+            amount = -random.uniform(25, 120)  # $25-120 entertainment
+            transaction = Transaction(
+                description=random.choice(["Movie Theater", "Concert", "Bar & Grill", "Bowling", "Mini Golf"]),
+                amount=round(amount, 2),
+                timestamp=transaction_date,
+                account_id=checking.id,
+                category_id=category_map["Entertainment"]
+            )
+            one_time_transactions.append(transaction)
+        
+        # Medical: Sporadic pattern, larger amounts
+        medical_dates = [15, 35, 90]  # Irregular medical visits
+        for days_ago in medical_dates:
+            transaction_date = datetime.now() - timedelta(days=days_ago)
+            amount = -random.uniform(40, 250)  # $40-250 medical
+            transaction = Transaction(
+                description=random.choice(["Doctor Visit", "Pharmacy", "Urgent Care", "Dental"]),
+                amount=round(amount, 2),
+                timestamp=transaction_date,
+                account_id=checking.id,
+                category_id=category_map["Medical"]
+            )
+            one_time_transactions.append(transaction)
+        
+        # Generate additional random transactions (untagged)
+        for i in range(15):  # Fewer random, more pattern-based
             days_ago = random.randint(1, 30)
             transaction_date = datetime.now() - timedelta(days=days_ago)
             
@@ -149,12 +252,10 @@ def create_test_data():
                 amount = random.uniform(50, 500)
             else:  # 90% chance of expense
                 descriptions = [
-                    "Grocery Store", "Gas Station", "Restaurant - Lunch", "Coffee Shop",
-                    "Amazon Purchase", "Target", "Uber Ride", "Movie Theater",
-                    "Bookstore", "Hardware Store", "Pharmacy", "Doctor Visit",
-                    "Car Maintenance", "Clothing Store", "Online Shopping"
+                    "Gas Station", "Coffee Shop", "Amazon Purchase", "Uber Ride",
+                    "Bookstore", "Hardware Store", "Clothing Store", "Online Shopping"
                 ]
-                amount = -random.uniform(15, 200)
+                amount = -random.uniform(15, 100)
             
             description = random.choice(descriptions)
             
@@ -163,6 +264,7 @@ def create_test_data():
                 amount=round(amount, 2),
                 timestamp=transaction_date,
                 account_id=checking.id
+                # No category_id - these remain untagged
             )
             one_time_transactions.append(transaction)
         
@@ -223,16 +325,6 @@ def create_test_data():
         for goal in goals:
             session.add(goal)
         
-        # Create an irregular category for testing
-        car_maintenance = IrregularCategory(
-            name="Car Maintenance",
-            account_id=checking.id,
-            window_days=120,
-            alpha=0.3,
-            safety_quantile=0.8
-        )
-        session.add(car_maintenance)
-        
         # Commit all data
         session.commit()
         
@@ -240,6 +332,8 @@ def create_test_data():
         print(f"   - Accounts: {checking.name}, {savings.name}")
         print(f"   - Recurring Income: {len(recurring_income)} items")
         print(f"   - Recurring Bills: {len(recurring_bills)} items")
+        print(f"   - Irregular Categories: {len(irregular_categories)} categories")
+        print(f"   - Tagged Transactions: ~30 with realistic patterns")
         print(f"   - One-time Transactions: {len(one_time_transactions + specific_transactions)} items")
         print(f"   - Goals: {len(goals)} items")
         print(f"   - Initial Balance: ${initial_balance.amount:,.2f} on {initial_balance.timestamp.date()}")
